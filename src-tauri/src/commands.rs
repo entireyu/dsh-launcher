@@ -1,23 +1,46 @@
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Emitter, State};
 
 use crate::state::{self, AppState, EnvInfo, ServerStatus, Settings};
 
-#[tauri::command]
-pub fn detect_env() -> EnvInfo {
-    state::detect_env()
+/// 可克隆的服务器共享状态快照（只含 Arc 字段），用于把阻塞工作丢到 spawn_blocking 线程。
+pub struct Shared {
+    pub pid: Arc<Mutex<Option<u32>>>,
+    pub stop: Arc<AtomicBool>,
+    pub url: Arc<Mutex<Option<String>>>,
+    pub logs: Arc<Mutex<VecDeque<String>>>,
+    pub settings: Arc<Mutex<Settings>>,
+}
+
+impl Shared {
+    pub fn from_state(st: &AppState) -> Self {
+        Self {
+            pid: Arc::clone(&st.pid),
+            stop: Arc::clone(&st.stop_requested),
+            url: Arc::clone(&st.server_url),
+            logs: Arc::clone(&st.logs),
+            settings: Arc::clone(&st.settings),
+        }
+    }
 }
 
 #[tauri::command]
-pub fn install_node(app: AppHandle, st: State<AppState>) -> Result<EnvInfo, String> {
+pub async fn detect_env() -> EnvInfo {
+    tauri::async_runtime::spawn_blocking(state::detect_env)
+        .await
+        .unwrap_or_default()
+}
+
+fn install_node_inner(app: &AppHandle, shared: &Shared) -> Result<EnvInfo, String> {
     state::push_log(
-        &st.logs,
+        &shared.logs,
         "[系统] 开始安装 Node.js LTS（winget，可能弹出 UAC 授权窗口，请点击“是”）",
     );
     let result = state::run_streaming(
-        &app,
+        app,
         "winget",
         &[
             "install",
@@ -28,14 +51,22 @@ pub fn install_node(app: AppHandle, st: State<AppState>) -> Result<EnvInfo, Stri
         ],
     );
     if let Err(e) = result {
-        state::push_log(&st.logs, &format!("[系统] winget 安装失败：{e}"));
+        state::push_log(&shared.logs, &format!("[系统] winget 安装失败：{e}"));
         return Err("Node.js 安装失败。请尝试手动到 https://nodejs.org 下载 LTS 版安装。".to_string());
     }
-    state::push_log(&st.logs, "[系统] Node.js 安装完成，正在重新检测");
+    state::push_log(&shared.logs, "[系统] Node.js 安装完成，正在重新检测");
     Ok(state::detect_env())
 }
 
-fn install_dsh_inner(app: &AppHandle, st: &AppState, spec: &str) -> Result<EnvInfo, String> {
+#[tauri::command]
+pub async fn install_node(app: AppHandle, st: State<'_, AppState>) -> Result<EnvInfo, String> {
+    let shared = Shared::from_state(&st);
+    tauri::async_runtime::spawn_blocking(move || install_node_inner(&app, &shared))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn install_dsh_inner(app: &AppHandle, shared: &Shared, spec: &str) -> Result<EnvInfo, String> {
     let env = state::detect_env();
     let node = env
         .node_path
@@ -48,7 +79,7 @@ fn install_dsh_inner(app: &AppHandle, st: &AppState, spec: &str) -> Result<EnvIn
         .ok_or("无法确定安装目录，请先安装 Node.js。".to_string())?;
 
     let registry = {
-        let s = st.settings.lock().unwrap();
+        let s = shared.settings.lock().unwrap();
         s.registry.trim().to_string()
     };
 
@@ -68,27 +99,34 @@ fn install_dsh_inner(app: &AppHandle, st: &AppState, spec: &str) -> Result<EnvIn
     }
 
     state::push_log(
-        &st.logs,
+        &shared.logs,
         &format!("[系统] 开始安装 {spec} 到 {install_prefix}"),
     );
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     state::run_streaming(app, &node, &arg_refs)?;
-    state::push_log(&st.logs, "[系统] 安装完成，正在校验");
+    state::push_log(&shared.logs, "[系统] 安装完成，正在校验");
     Ok(state::detect_env())
 }
 
 #[tauri::command]
-pub fn install_dsh(app: AppHandle, st: State<AppState>) -> Result<EnvInfo, String> {
-    install_dsh_inner(&app, &st, "@deepseek-ai/dsh")
+pub async fn install_dsh(app: AppHandle, st: State<'_, AppState>) -> Result<EnvInfo, String> {
+    let shared = Shared::from_state(&st);
+    tauri::async_runtime::spawn_blocking(move || install_dsh_inner(&app, &shared, "@deepseek-ai/dsh"))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn update_dsh(app: AppHandle, st: State<AppState>) -> Result<EnvInfo, String> {
-    install_dsh_inner(&app, &st, "@deepseek-ai/dsh@latest")
+pub async fn update_dsh(app: AppHandle, st: State<'_, AppState>) -> Result<EnvInfo, String> {
+    let shared = Shared::from_state(&st);
+    tauri::async_runtime::spawn_blocking(move || {
+        install_dsh_inner(&app, &shared, "@deepseek-ai/dsh@latest")
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-pub fn verify_dsh() -> Result<String, String> {
+fn verify_dsh_inner() -> Result<String, String> {
     let env = state::detect_env();
     let node = env.node_path.clone().ok_or("未检测到 Node.js。".to_string())?;
     let bin = state::resolve_dsh_bin(&env).ok_or("未安装 DeepSeek Harness。".to_string())?;
@@ -97,8 +135,15 @@ pub fn verify_dsh() -> Result<String, String> {
     Ok(format!("DeepSeek Harness {version} 安装正常，可正常启动"))
 }
 
-pub fn start_server_impl(app: &AppHandle, st: &AppState) -> Result<ServerStatus, String> {
-    if st.pid.lock().unwrap().is_some() {
+#[tauri::command]
+pub async fn verify_dsh() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(verify_dsh_inner)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatus, String> {
+    if shared.pid.lock().unwrap().is_some() {
         return Err("服务器已在运行".to_string());
     }
 
@@ -113,12 +158,12 @@ pub fn start_server_impl(app: &AppHandle, st: &AppState) -> Result<ServerStatus,
     let bin = state::resolve_dsh_bin(&env).ok_or("找不到 dsh 入口文件，请重新安装 Harness。".to_string())?;
 
     let (port, workspace) = {
-        let s = st.settings.lock().unwrap();
+        let s = shared.settings.lock().unwrap();
         (s.port, s.workspace_dir.clone())
     };
 
-    st.stop_requested.store(false, Ordering::SeqCst);
-    *st.server_url.lock().unwrap() = None;
+    shared.stop.store(false, Ordering::SeqCst);
+    *shared.url.lock().unwrap() = None;
 
     let mut cmd = std::process::Command::new(&node);
     cmd.arg(bin.to_string_lossy().to_string())
@@ -142,10 +187,10 @@ pub fn start_server_impl(app: &AppHandle, st: &AppState) -> Result<ServerStatus,
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    *st.pid.lock().unwrap() = Some(pid);
+    *shared.pid.lock().unwrap() = Some(pid);
     state::refresh_tray(app, true);
     state::push_log(
-        &st.logs,
+        &shared.logs,
         &format!("[系统] 正在启动 dsh web --port {port}（pid {pid}）"),
     );
 
@@ -158,8 +203,8 @@ pub fn start_server_impl(app: &AppHandle, st: &AppState) -> Result<ServerStatus,
     }
     for stream in streams {
         let app = app.clone();
-        let logs = Arc::clone(&st.logs);
-        let url = Arc::clone(&st.server_url);
+        let logs = Arc::clone(&shared.logs);
+        let url = Arc::clone(&shared.url);
         std::thread::spawn(move || {
             use std::io::{BufRead, BufReader};
             for line in BufReader::new(stream).lines() {
@@ -183,10 +228,10 @@ pub fn start_server_impl(app: &AppHandle, st: &AppState) -> Result<ServerStatus,
     }
 
     let app2 = app.clone();
-    let pid_slot = Arc::clone(&st.pid);
-    let url_slot = Arc::clone(&st.server_url);
-    let stop = Arc::clone(&st.stop_requested);
-    let logs = Arc::clone(&st.logs);
+    let pid_slot = Arc::clone(&shared.pid);
+    let url_slot = Arc::clone(&shared.url);
+    let stop = Arc::clone(&shared.stop);
+    let logs = Arc::clone(&shared.logs);
     std::thread::spawn(move || {
         let result = child.wait();
         let was_stopped = stop.load(Ordering::SeqCst);
@@ -204,31 +249,44 @@ pub fn start_server_impl(app: &AppHandle, st: &AppState) -> Result<ServerStatus,
         }
     });
 
-    Ok(state::status_of(st))
+    Ok(state::status_from(&shared.pid, &shared.url))
 }
 
 #[tauri::command]
-pub fn start_server(app: AppHandle, st: State<AppState>) -> Result<ServerStatus, String> {
-    start_server_impl(&app, &st)
+pub async fn start_server(app: AppHandle, st: State<'_, AppState>) -> Result<ServerStatus, String> {
+    let shared = Shared::from_state(&st);
+    tauri::async_runtime::spawn_blocking(move || start_server_impl(&app, &shared))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-pub fn stop_server(app: AppHandle, st: State<AppState>) -> Result<ServerStatus, String> {
-    st.stop_requested.store(true, Ordering::SeqCst);
-    let pid = *st.pid.lock().unwrap();
+fn stop_server_inner(app: &AppHandle, shared: &Shared) -> Result<ServerStatus, String> {
+    shared.stop.store(true, Ordering::SeqCst);
+    let pid = *shared.pid.lock().unwrap();
     if let Some(pid) = pid {
-        state::push_log(&st.logs, &format!("[系统] 正在停止服务器（pid {pid}）"));
+        state::push_log(&shared.logs, &format!("[系统] 正在停止服务器（pid {pid}）"));
         let _ = state::run_output("taskkill", &["/PID", &pid.to_string(), "/T", "/F"]);
-        *st.pid.lock().unwrap() = None;
-        *st.server_url.lock().unwrap() = None;
+        *shared.pid.lock().unwrap() = None;
+        *shared.url.lock().unwrap() = None;
     }
-    state::refresh_tray(&app, false);
-    Ok(state::status_of(&st))
+    state::refresh_tray(app, false);
+    Ok(state::status_from(&shared.pid, &shared.url))
 }
 
 #[tauri::command]
-pub fn server_status(st: State<AppState>) -> ServerStatus {
-    state::status_of(&st)
+pub async fn stop_server(app: AppHandle, st: State<'_, AppState>) -> Result<ServerStatus, String> {
+    let shared = Shared::from_state(&st);
+    tauri::async_runtime::spawn_blocking(move || stop_server_inner(&app, &shared))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn server_status(st: State<'_, AppState>) -> Result<ServerStatus, String> {
+    let shared = Shared::from_state(&st);
+    tauri::async_runtime::spawn_blocking(move || state::status_from(&shared.pid, &shared.url))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

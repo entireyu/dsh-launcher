@@ -73,6 +73,31 @@ pub struct ServerStatus {
     pub pid: Option<u32>,
 }
 
+impl Default for EnvInfo {
+    fn default() -> Self {
+        Self {
+            found: false,
+            version: None,
+            node_path: None,
+            npm_prefix: None,
+            install_prefix: None,
+            prefix_fallback: false,
+            dsh_installed: false,
+            dsh_version: None,
+        }
+    }
+}
+
+impl Default for ServerStatus {
+    fn default() -> Self {
+        Self {
+            phase: "stopped".to_string(),
+            url: None,
+            pid: None,
+        }
+    }
+}
+
 pub fn run_output(program: &str, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new(program);
     cmd.args(args)
@@ -189,9 +214,9 @@ pub fn health(url: &str) -> bool {
         .is_ok()
 }
 
-pub fn status_of(st: &AppState) -> ServerStatus {
-    let pid = *st.pid.lock().unwrap();
-    let url = st.server_url.lock().unwrap().clone();
+pub fn status_from(pid: &Mutex<Option<u32>>, url: &Mutex<Option<String>>) -> ServerStatus {
+    let pid = *pid.lock().unwrap();
+    let url = url.lock().unwrap().clone();
     let phase = match (pid, &url) {
         (None, _) => "stopped".to_string(),
         (Some(_), None) => "starting".to_string(),

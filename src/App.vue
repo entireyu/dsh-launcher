@@ -70,7 +70,11 @@ async function refreshEnv() {
 }
 
 async function refreshStatus() {
-  server.value = await invoke<ServerStatus>("server_status");
+  try {
+    server.value = await invoke<ServerStatus>("server_status");
+  } catch {
+    /* 忽略瞬时错误 */
+  }
 }
 
 async function refreshAll() {

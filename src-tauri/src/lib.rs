@@ -126,7 +126,8 @@ pub fn run() {
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     let st = h.state::<AppState>();
-                    let _ = commands::start_server_impl(&h, &st);
+                    let shared = commands::Shared::from_state(&st);
+                    let _ = commands::start_server_impl(&h, &shared);
                 });
             }
 

@@ -270,13 +270,24 @@ pub async fn start_server(app: AppHandle, st: State<'_, AppState>) -> Result<Ser
 
 fn stop_server_inner(app: &AppHandle, shared: &Shared) -> Result<ServerStatus, String> {
     shared.stop.store(true, Ordering::SeqCst);
-    let pid = *shared.pid.lock().unwrap();
-    if let Some(pid) = pid {
+    let managed_pid = *shared.pid.lock().unwrap();
+    let target_pid = if let Some(pid) = managed_pid {
+        Some(pid)
+    } else {
+        // 外部启动的服务器：按端口定位进程
+        let port = shared.settings.lock().unwrap().port;
+        state::find_pid_on_port(port)
+    };
+
+    if let Some(pid) = target_pid {
         state::push_log(&shared.logs, &format!("[系统] 正在停止服务器（pid {pid}）"));
         let _ = state::run_output("taskkill", &["/PID", &pid.to_string(), "/T", "/F"]);
-        *shared.pid.lock().unwrap() = None;
-        *shared.url.lock().unwrap() = None;
+    } else {
+        state::push_log(&shared.logs, "[系统] 未找到正在监听该端口的进程");
     }
+
+    *shared.pid.lock().unwrap() = None;
+    *shared.url.lock().unwrap() = None;
     state::refresh_tray(app, false);
     Ok(ServerStatus {
         phase: "stopped".to_string(),

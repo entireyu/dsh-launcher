@@ -247,6 +247,24 @@ pub fn status_from(
     }
 }
 
+pub fn find_pid_on_port(port: u16) -> Option<u32> {
+    let out = run_output("netstat", &["-ano", "-p", "tcp"]).ok()?;
+    let suffix = format!(":{port}");
+    for line in out.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 5
+            && parts[0].eq_ignore_ascii_case("tcp")
+            && parts[3].eq_ignore_ascii_case("listening")
+            && parts[1].ends_with(&suffix)
+        {
+            if let Ok(pid) = parts[4].parse::<u32>() {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
 fn fallback_node_path() -> Option<String> {
     [
         "C:\\Program Files\\nodejs\\node.exe",

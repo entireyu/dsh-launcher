@@ -37,6 +37,7 @@ const busy = ref<string | null>(null);
 const error = ref<string>("");
 const notice = ref<string>("");
 const showSettings = ref(false);
+const confirmingStop = ref(false);
 
 const unlisteners: UnlistenFn[] = [];
 let pollTimer: number | undefined;
@@ -73,6 +74,7 @@ async function refreshEnv() {
 async function refreshStatus() {
   try {
     server.value = await invoke<ServerStatus>("server_status");
+    if (server.value.phase !== "external") confirmingStop.value = false;
   } catch {
     /* 忽略瞬时错误 */
   }
@@ -112,6 +114,11 @@ async function startServer() {
 }
 
 async function stopServer() {
+  if (server.value.phase === "external" && !confirmingStop.value) {
+    confirmingStop.value = true;
+    return;
+  }
+  confirmingStop.value = false;
   const r = await wrap("正在停止…", () => invoke<ServerStatus>("stop_server"));
   if (r) server.value = r;
 }
@@ -277,10 +284,13 @@ function autoScroll() {
         <div class="row">
           <button v-if="server.phase === 'stopped'" class="primary" @click="startServer">启动服务器</button>
           <button v-else-if="server.phase === 'error'" class="primary" @click="startServer">重新启动</button>
-          <button v-else-if="server.phase !== 'external'" class="danger" @click="stopServer">停止服务器</button>
+          <button v-else class="danger" @click="stopServer">
+            {{ server.phase === "external" && confirmingStop ? "再次点击确认停止" : "停止服务器" }}
+          </button>
+          <button v-if="server.phase === 'external' && confirmingStop" class="ghost" @click="confirmingStop = false">取消</button>
           <button v-if="server.url" @click="openUrl">在浏览器打开</button>
         </div>
-        <p v-if="server.phase === 'external'" class="hint warn">检测到该端口已有服务器在运行（由外部启动），本程序不会停止它。</p>
+        <p v-if="server.phase === 'external'" class="hint warn">该服务器由外部启动；点击「停止服务器」将按端口定位并结束对应进程（需二次确认）。</p>
       </div>
     </section>
 

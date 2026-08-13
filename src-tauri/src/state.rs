@@ -60,9 +60,9 @@ pub struct EnvInfo {
     pub node_path: Option<String>,
     pub npm_prefix: Option<String>,
     pub install_prefix: Option<String>,
-    pub prefix_fallback: bool,
     pub dsh_installed: bool,
     pub dsh_version: Option<String>,
+    pub dsh_bin: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -81,9 +81,9 @@ impl Default for EnvInfo {
             node_path: None,
             npm_prefix: None,
             install_prefix: None,
-            prefix_fallback: false,
             dsh_installed: false,
             dsh_version: None,
+            dsh_bin: None,
         }
     }
 }
@@ -291,43 +291,15 @@ pub fn dsh_bin(npm_prefix: &str) -> Option<PathBuf> {
     bin.exists().then_some(bin)
 }
 
-pub fn fallback_prefix_dir() -> PathBuf {
+pub fn app_prefix_dir() -> PathBuf {
     let base = std::env::var("LOCALAPPDATA")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
     Path::new(&base).join("dsh-launcher").join("npm")
 }
 
-pub fn is_dir_writable(dir: &str) -> bool {
-    let path = Path::new(dir);
-    if !path.is_dir() {
-        return path
-            .parent()
-            .map(|p| is_dir_writable(&p.to_string_lossy()))
-            .unwrap_or(false);
-    }
-    let probe = path.join(format!(".dsh-write-probe-{}", std::process::id()));
-    match std::fs::File::create(&probe) {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&probe);
-            true
-        }
-        Err(_) => false,
-    }
-}
-
 pub fn resolve_dsh_bin(env: &EnvInfo) -> Option<PathBuf> {
-    if let Some(p) = env.npm_prefix.as_deref() {
-        if let Some(bin) = dsh_bin(p) {
-            return Some(bin);
-        }
-    }
-    if let Some(p) = env.install_prefix.as_deref() {
-        if let Some(bin) = dsh_bin(p) {
-            return Some(bin);
-        }
-    }
-    None
+    env.dsh_bin.as_ref().map(PathBuf::from)
 }
 
 pub fn refresh_tray(app: &AppHandle, running: bool) {
@@ -360,29 +332,28 @@ pub fn detect_env() -> EnvInfo {
         .and_then(|cli| run_output(&node, &[cli.to_str().unwrap_or(""), "prefix", "-g"]).ok())
         .filter(|s| !s.is_empty());
 
-    // 兜底：全局前缀不可写时，改用用户级目录安装（无需管理员权限）
-    let (install_prefix, prefix_fallback) = match &npm_prefix {
-        Some(p) if is_dir_writable(p) => (Some(p.clone()), false),
-        Some(_) => {
-            let local = fallback_prefix_dir();
-            let _ = std::fs::create_dir_all(&local);
-            (Some(local.to_string_lossy().to_string()), true)
+    // 应用专用安装目录（始终使用，隔离且免管理员权限）
+    let install_prefix = {
+        let dir = app_prefix_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        Some(dir.to_string_lossy().to_string())
+    };
+
+    // 依次尝试：应用目录 → 全局前缀；以 `dsh --version` 能否成功为准（排除残缺安装）
+    let mut dsh_bin_path: Option<PathBuf> = None;
+    let mut dsh_version: Option<String> = None;
+    for prefix in [install_prefix.as_deref(), npm_prefix.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(bin) = dsh_bin(prefix) {
+            if let Ok(v) = run_output(&node, &[bin.to_str().unwrap_or(""), "--version"]) {
+                dsh_bin_path = Some(bin);
+                dsh_version = Some(v);
+                break;
+            }
         }
-        None => (None, false),
-    };
-
-    // 优先全局前缀，其次兜底目录
-    let dsh_bin_path = npm_prefix
-        .as_deref()
-        .and_then(dsh_bin)
-        .or_else(|| install_prefix.as_deref().and_then(dsh_bin));
-
-    let (dsh_installed, dsh_version) = if let Some(bin) = dsh_bin_path {
-        let v = run_output(&node, &[bin.to_str().unwrap_or(""), "--version"]).ok();
-        (true, v)
-    } else {
-        (false, None)
-    };
+    }
 
     EnvInfo {
         found: node_path.is_some() && version.is_some(),
@@ -390,9 +361,9 @@ pub fn detect_env() -> EnvInfo {
         node_path,
         npm_prefix,
         install_prefix,
-        prefix_fallback,
-        dsh_installed,
+        dsh_installed: dsh_bin_path.is_some(),
         dsh_version,
+        dsh_bin: dsh_bin_path.map(|p| p.to_string_lossy().to_string()),
     }
 }
 

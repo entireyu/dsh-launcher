@@ -78,6 +78,10 @@ fn install_dsh_inner(app: &AppHandle, shared: &Shared, spec: &str) -> Result<Env
         .clone()
         .ok_or("无法确定安装目录，请先安装 Node.js。".to_string())?;
 
+    // 应用目录专用：先清空重装，避免残缺/损坏的依赖树（如缺失 js-yaml）
+    let _ = std::fs::remove_dir_all(&install_prefix);
+    let _ = std::fs::create_dir_all(&install_prefix);
+
     let registry = {
         let s = shared.settings.lock().unwrap();
         s.registry.trim().to_string()
@@ -100,7 +104,7 @@ fn install_dsh_inner(app: &AppHandle, shared: &Shared, spec: &str) -> Result<Env
 
     state::push_log(
         &shared.logs,
-        &format!("[系统] 开始安装 {spec} 到 {install_prefix}"),
+        &format!("[系统] 清空旧安装后开始安装 {spec} 到 {install_prefix}"),
     );
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     state::run_streaming(app, &node, &arg_refs)?;

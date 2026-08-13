@@ -9,7 +9,6 @@ interface EnvInfo {
   nodePath: string | null;
   npmPrefix: string | null;
   installPrefix: string | null;
-  prefixFallback: boolean;
   dshInstalled: boolean;
   dshVersion: string | null;
 }
@@ -38,6 +37,8 @@ const error = ref<string>("");
 const notice = ref<string>("");
 const showSettings = ref(false);
 const confirmingStop = ref(false);
+const autoRestartCount = ref(0);
+const MAX_AUTO_RESTART = 3;
 
 const unlisteners: UnlistenFn[] = [];
 let pollTimer: number | undefined;
@@ -75,6 +76,7 @@ async function refreshStatus() {
   try {
     server.value = await invoke<ServerStatus>("server_status");
     if (server.value.phase !== "external") confirmingStop.value = false;
+    if (server.value.phase === "running") autoRestartCount.value = 0;
   } catch {
     /* 忽略瞬时错误 */
   }
@@ -109,6 +111,7 @@ async function verifyDsh() {
 }
 
 async function startServer() {
+  autoRestartCount.value = 0;
   const r = await wrap("正在启动…", () => invoke<ServerStatus>("start_server"));
   if (r) server.value = r;
 }
@@ -179,9 +182,15 @@ onMounted(async () => {
   unlisteners.push(
     await listen<number>("server-exited", async () => {
       server.value = await invoke<ServerStatus>("server_status");
-      if (settings.value?.autoRestart) {
+      if (settings.value?.autoRestart && autoRestartCount.value < MAX_AUTO_RESTART) {
+        autoRestartCount.value += 1;
+        logs.value.push(
+          `[系统] 服务器异常退出，自动重启（第 ${autoRestartCount.value}/${MAX_AUTO_RESTART} 次）`,
+        );
         const r = await invoke<ServerStatus>("start_server").catch(() => null);
         if (r) server.value = r;
+      } else if (autoRestartCount.value >= MAX_AUTO_RESTART) {
+        error.value = `服务器连续 ${MAX_AUTO_RESTART} 次启动失败，已停止自动重试。请查看日志或重新安装 Harness。`;
       }
     }),
   );
@@ -266,7 +275,7 @@ function autoScroll() {
             <code>{{ env?.installPrefix ?? "—" }}</code>
           </li>
         </ul>
-        <p v-if="env?.prefixFallback" class="hint warn">全局前缀不可写，已改用用户目录安装（无需管理员权限）。</p>
+        <p class="hint">Harness 安装到程序独立目录（见“安装目录”），与系统全局 npm 隔离，更稳定。</p>
         <div class="row">
           <button v-if="env && !env.dshInstalled" class="primary" @click="installDsh">安装 Harness</button>
           <button v-else @click="updateDsh">更新到最新</button>

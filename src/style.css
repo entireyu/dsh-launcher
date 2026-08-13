@@ -80,6 +80,10 @@ body {
   background: var(--ok);
   box-shadow: 0 0 8px var(--ok);
 }
+.dot.external {
+  background: var(--ok);
+  box-shadow: 0 0 8px var(--ok);
+}
 .dot.starting {
   background: var(--warn);
 }

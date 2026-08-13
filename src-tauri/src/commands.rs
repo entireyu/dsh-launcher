@@ -147,6 +147,19 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
         return Err("服务器已在运行".to_string());
     }
 
+    let (port, workspace) = {
+        let s = shared.settings.lock().unwrap();
+        (s.port, s.workspace_dir.clone())
+    };
+
+    // 端口上可能已有外部启动的服务器，避免重复启动
+    let probe = format!("http://127.0.0.1:{port}");
+    if state::health(&probe) {
+        return Err(format!(
+            "端口 {port} 已有服务器在运行（可能由外部启动），无需重复启动"
+        ));
+    }
+
     let env = state::detect_env();
     if !env.dsh_installed {
         return Err("尚未安装 DeepSeek Harness，请先点击“安装/更新”。".to_string());
@@ -156,11 +169,6 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
         .clone()
         .ok_or("未检测到 Node.js，请先安装。".to_string())?;
     let bin = state::resolve_dsh_bin(&env).ok_or("找不到 dsh 入口文件，请重新安装 Harness。".to_string())?;
-
-    let (port, workspace) = {
-        let s = shared.settings.lock().unwrap();
-        (s.port, s.workspace_dir.clone())
-    };
 
     shared.stop.store(false, Ordering::SeqCst);
     *shared.url.lock().unwrap() = None;
@@ -249,7 +257,7 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
         }
     });
 
-    Ok(state::status_from(&shared.pid, &shared.url))
+    Ok(state::status_from(&shared.pid, &shared.url, port))
 }
 
 #[tauri::command]
@@ -270,7 +278,11 @@ fn stop_server_inner(app: &AppHandle, shared: &Shared) -> Result<ServerStatus, S
         *shared.url.lock().unwrap() = None;
     }
     state::refresh_tray(app, false);
-    Ok(state::status_from(&shared.pid, &shared.url))
+    Ok(ServerStatus {
+        phase: "stopped".to_string(),
+        url: None,
+        pid: None,
+    })
 }
 
 #[tauri::command]
@@ -284,7 +296,8 @@ pub async fn stop_server(app: AppHandle, st: State<'_, AppState>) -> Result<Serv
 #[tauri::command]
 pub async fn server_status(st: State<'_, AppState>) -> Result<ServerStatus, String> {
     let shared = Shared::from_state(&st);
-    tauri::async_runtime::spawn_blocking(move || state::status_from(&shared.pid, &shared.url))
+    let port = shared.settings.lock().unwrap().port;
+    tauri::async_runtime::spawn_blocking(move || state::status_from(&shared.pid, &shared.url, port))
         .await
         .map_err(|e| e.to_string())
 }

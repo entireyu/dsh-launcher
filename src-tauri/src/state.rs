@@ -214,21 +214,37 @@ pub fn health(url: &str) -> bool {
         .is_ok()
 }
 
-pub fn status_from(pid: &Mutex<Option<u32>>, url: &Mutex<Option<String>>) -> ServerStatus {
-    let pid = *pid.lock().unwrap();
-    let url = url.lock().unwrap().clone();
-    let phase = match (pid, &url) {
-        (None, _) => "stopped".to_string(),
-        (Some(_), None) => "starting".to_string(),
+pub fn status_from(
+    pid: &Mutex<Option<u32>>,
+    url: &Mutex<Option<String>>,
+    port: u16,
+) -> ServerStatus {
+    let pid_val = *pid.lock().unwrap();
+    let url_val = url.lock().unwrap().clone();
+    let (phase, url_val) = match (pid_val, url_val) {
+        (Some(_), None) => ("starting".to_string(), None),
         (Some(_), Some(u)) => {
-            if health(u) {
-                "running".to_string()
+            if health(&u) {
+                ("running".to_string(), Some(u))
             } else {
-                "error".to_string()
+                ("error".to_string(), Some(u))
+            }
+        }
+        (None, _) => {
+            // 应用未启动服务器：探测配置端口上是否已有外部运行的实例
+            let probe = format!("http://127.0.0.1:{port}");
+            if health(&probe) {
+                ("external".to_string(), Some(probe))
+            } else {
+                ("stopped".to_string(), None)
             }
         }
     };
-    ServerStatus { phase, url, pid }
+    ServerStatus {
+        phase,
+        url: url_val,
+        pid: pid_val,
+    }
 }
 
 fn fallback_node_path() -> Option<String> {

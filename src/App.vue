@@ -45,6 +45,7 @@ const phaseText: Record<string, string> = {
   stopped: "已停止",
   starting: "启动中",
   running: "运行中",
+  external: "运行中（外部）",
   error: "异常",
 };
 
@@ -276,9 +277,10 @@ function autoScroll() {
         <div class="row">
           <button v-if="server.phase === 'stopped'" class="primary" @click="startServer">启动服务器</button>
           <button v-else-if="server.phase === 'error'" class="primary" @click="startServer">重新启动</button>
-          <button v-else class="danger" @click="stopServer">停止服务器</button>
+          <button v-else-if="server.phase !== 'external'" class="danger" @click="stopServer">停止服务器</button>
           <button v-if="server.url" @click="openUrl">在浏览器打开</button>
         </div>
+        <p v-if="server.phase === 'external'" class="hint warn">检测到该端口已有服务器在运行（由外部启动），本程序不会停止它。</p>
       </div>
     </section>
 

@@ -290,6 +290,11 @@ button.small {
   margin: 10px 0 0;
 }
 
+.hint.warn {
+  color: var(--warn);
+  margin: 12px 0 0;
+}
+
 .logs-head {
   display: flex;
   align-items: center;

@@ -9,6 +9,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use tauri::menu::MenuItem;
 use tauri::tray::TrayIcon;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -23,6 +24,8 @@ pub struct AppState {
     pub settings: Arc<Mutex<Settings>>,
     pub quitting: Arc<AtomicBool>,
     pub tray: Mutex<Option<TrayIcon>>,
+    pub tray_start: Mutex<Option<MenuItem<tauri::Wry>>>,
+    pub tray_stop: Mutex<Option<MenuItem<tauri::Wry>>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -56,6 +59,8 @@ pub struct EnvInfo {
     pub version: Option<String>,
     pub node_path: Option<String>,
     pub npm_prefix: Option<String>,
+    pub install_prefix: Option<String>,
+    pub prefix_fallback: bool,
     pub dsh_installed: bool,
     pub dsh_version: Option<String>,
 }
@@ -227,6 +232,58 @@ pub fn dsh_bin(npm_prefix: &str) -> Option<PathBuf> {
     bin.exists().then_some(bin)
 }
 
+pub fn fallback_prefix_dir() -> PathBuf {
+    let base = std::env::var("LOCALAPPDATA")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    Path::new(&base).join("dsh-launcher").join("npm")
+}
+
+pub fn is_dir_writable(dir: &str) -> bool {
+    let path = Path::new(dir);
+    if !path.is_dir() {
+        return path
+            .parent()
+            .map(|p| is_dir_writable(&p.to_string_lossy()))
+            .unwrap_or(false);
+    }
+    let probe = path.join(format!(".dsh-write-probe-{}", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+pub fn resolve_dsh_bin(env: &EnvInfo) -> Option<PathBuf> {
+    if let Some(p) = env.npm_prefix.as_deref() {
+        if let Some(bin) = dsh_bin(p) {
+            return Some(bin);
+        }
+    }
+    if let Some(p) = env.install_prefix.as_deref() {
+        if let Some(bin) = dsh_bin(p) {
+            return Some(bin);
+        }
+    }
+    None
+}
+
+pub fn refresh_tray(app: &AppHandle, running: bool) {
+    let st = app.state::<AppState>();
+    let start_item = st.tray_start.lock().unwrap().clone();
+    let stop_item = st.tray_stop.lock().unwrap().clone();
+    if let Some(item) = start_item {
+        let _ = item.set_enabled(!running);
+        let _ = item.set_text(if running { "服务器运行中" } else { "启动服务器" });
+    }
+    if let Some(item) = stop_item {
+        let _ = item.set_enabled(running);
+    }
+}
+
 pub fn detect_env() -> EnvInfo {
     let version_on_path = run_output("node", &["--version"]).ok();
 
@@ -244,13 +301,26 @@ pub fn detect_env() -> EnvInfo {
         .and_then(|cli| run_output(&node, &[cli.to_str().unwrap_or(""), "prefix", "-g"]).ok())
         .filter(|s| !s.is_empty());
 
-    let (dsh_installed, dsh_version) = if let Some(prefix) = &npm_prefix {
-        if let Some(bin) = dsh_bin(prefix) {
-            let v = run_output(&node, &[bin.to_str().unwrap_or(""), "--version"]).ok();
-            (true, v)
-        } else {
-            (false, None)
+    // 兜底：全局前缀不可写时，改用用户级目录安装（无需管理员权限）
+    let (install_prefix, prefix_fallback) = match &npm_prefix {
+        Some(p) if is_dir_writable(p) => (Some(p.clone()), false),
+        Some(_) => {
+            let local = fallback_prefix_dir();
+            let _ = std::fs::create_dir_all(&local);
+            (Some(local.to_string_lossy().to_string()), true)
         }
+        None => (None, false),
+    };
+
+    // 优先全局前缀，其次兜底目录
+    let dsh_bin_path = npm_prefix
+        .as_deref()
+        .and_then(dsh_bin)
+        .or_else(|| install_prefix.as_deref().and_then(dsh_bin));
+
+    let (dsh_installed, dsh_version) = if let Some(bin) = dsh_bin_path {
+        let v = run_output(&node, &[bin.to_str().unwrap_or(""), "--version"]).ok();
+        (true, v)
     } else {
         (false, None)
     };
@@ -260,6 +330,8 @@ pub fn detect_env() -> EnvInfo {
         version,
         node_path,
         npm_prefix,
+        install_prefix,
+        prefix_fallback,
         dsh_installed,
         dsh_version,
     }

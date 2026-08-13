@@ -8,6 +8,8 @@ interface EnvInfo {
   version: string | null;
   nodePath: string | null;
   npmPrefix: string | null;
+  installPrefix: string | null;
+  prefixFallback: boolean;
   dshInstalled: boolean;
   dshVersion: string | null;
 }
@@ -244,10 +246,15 @@ function autoScroll() {
             </b>
           </li>
           <li>
-            <span>npm 前缀</span>
+            <span>npm 全局前缀</span>
             <code>{{ env?.npmPrefix ?? "—" }}</code>
           </li>
+          <li>
+            <span>安装目录</span>
+            <code>{{ env?.installPrefix ?? "—" }}</code>
+          </li>
         </ul>
+        <p v-if="env?.prefixFallback" class="hint warn">全局前缀不可写，已改用用户目录安装（无需管理员权限）。</p>
         <div class="row">
           <button v-if="env && !env.dshInstalled" class="primary" @click="installDsh">安装 Harness</button>
           <button v-else @click="updateDsh">更新到最新</button>

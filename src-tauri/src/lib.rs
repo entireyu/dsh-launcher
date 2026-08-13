@@ -22,7 +22,7 @@ fn show_main(app: &tauri::AppHandle) {
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<tauri::tray::TrayIcon> {
     let show = MenuItem::with_id(app, "show", "打开面板", true, None::<&str>)?;
     let start = MenuItem::with_id(app, "start", "启动服务器", true, None::<&str>)?;
-    let stop = MenuItem::with_id(app, "stop", "停止服务器", true, None::<&str>)?;
+    let stop = MenuItem::with_id(app, "stop", "停止服务器", false, None::<&str>)?;
     let open = MenuItem::with_id(app, "open", "在浏览器打开", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(
@@ -36,6 +36,12 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<tauri::tray::TrayIcon> {
             &quit,
         ],
     )?;
+
+    {
+        let st = app.state::<AppState>();
+        *st.tray_start.lock().unwrap() = Some(start.clone());
+        *st.tray_stop.lock().unwrap() = Some(stop.clone());
+    }
 
     let mut builder = TrayIconBuilder::with_id("main-tray")
         .menu(&menu)

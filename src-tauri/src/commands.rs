@@ -42,6 +42,10 @@ fn install_dsh_inner(app: &AppHandle, st: &AppState, spec: &str) -> Result<EnvIn
         .clone()
         .ok_or("未检测到 Node.js，请先安装 Node.js。".to_string())?;
     let cli = state::npm_cli(&node).ok_or("未找到 npm，请确认 Node.js 安装完整。".to_string())?;
+    let install_prefix = env
+        .install_prefix
+        .clone()
+        .ok_or("无法确定安装目录，请先安装 Node.js。".to_string())?;
 
     let registry = {
         let s = st.settings.lock().unwrap();
@@ -52,6 +56,8 @@ fn install_dsh_inner(app: &AppHandle, st: &AppState, spec: &str) -> Result<EnvIn
         cli.to_string_lossy().to_string(),
         "install".to_string(),
         "-g".to_string(),
+        "--prefix".to_string(),
+        install_prefix.clone(),
         spec.to_string(),
         "--no-audit".to_string(),
         "--no-fund".to_string(),
@@ -61,7 +67,10 @@ fn install_dsh_inner(app: &AppHandle, st: &AppState, spec: &str) -> Result<EnvIn
         args.push(registry);
     }
 
-    state::push_log(&st.logs, &format!("[系统] 开始安装 {spec}"));
+    state::push_log(
+        &st.logs,
+        &format!("[系统] 开始安装 {spec} 到 {install_prefix}"),
+    );
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     state::run_streaming(app, &node, &arg_refs)?;
     state::push_log(&st.logs, "[系统] 安装完成，正在校验");
@@ -81,9 +90,8 @@ pub fn update_dsh(app: AppHandle, st: State<AppState>) -> Result<EnvInfo, String
 #[tauri::command]
 pub fn verify_dsh() -> Result<String, String> {
     let env = state::detect_env();
-    let node = env.node_path.ok_or("未检测到 Node.js。".to_string())?;
-    let prefix = env.npm_prefix.ok_or("未找到 npm 前缀。".to_string())?;
-    let bin = state::dsh_bin(&prefix).ok_or("未安装 DeepSeek Harness。".to_string())?;
+    let node = env.node_path.clone().ok_or("未检测到 Node.js。".to_string())?;
+    let bin = state::resolve_dsh_bin(&env).ok_or("未安装 DeepSeek Harness。".to_string())?;
     let version = state::run_output(&node, &[bin.to_str().unwrap_or(""), "--version"])?;
     state::run_output(&node, &[bin.to_str().unwrap_or(""), "--dump-default-config"])?;
     Ok(format!("DeepSeek Harness {version} 安装正常，可正常启动"))
@@ -102,11 +110,7 @@ pub fn start_server_impl(app: &AppHandle, st: &AppState) -> Result<ServerStatus,
         .node_path
         .clone()
         .ok_or("未检测到 Node.js，请先安装。".to_string())?;
-    let prefix = env
-        .npm_prefix
-        .clone()
-        .ok_or("未找到 npm 前缀，请重新安装 Node.js。".to_string())?;
-    let bin = state::dsh_bin(&prefix).ok_or("找不到 dsh 入口文件，请重新安装 Harness。".to_string())?;
+    let bin = state::resolve_dsh_bin(&env).ok_or("找不到 dsh 入口文件，请重新安装 Harness。".to_string())?;
 
     let (port, workspace) = {
         let s = st.settings.lock().unwrap();
@@ -139,6 +143,7 @@ pub fn start_server_impl(app: &AppHandle, st: &AppState) -> Result<ServerStatus,
     let stderr = child.stderr.take();
 
     *st.pid.lock().unwrap() = Some(pid);
+    state::refresh_tray(app, true);
     state::push_log(
         &st.logs,
         &format!("[系统] 正在启动 dsh web --port {port}（pid {pid}）"),
@@ -193,6 +198,7 @@ pub fn start_server_impl(app: &AppHandle, st: &AppState) -> Result<ServerStatus,
         drop(p);
         if !was_stopped {
             let code = result.as_ref().ok().and_then(|s| s.code()).unwrap_or(-1);
+            state::refresh_tray(&app2, false);
             state::push_log(&logs, &format!("[系统] 服务器进程已退出（退出码 {code}）"));
             let _ = app2.emit("server-exited", code);
         }
@@ -207,7 +213,7 @@ pub fn start_server(app: AppHandle, st: State<AppState>) -> Result<ServerStatus,
 }
 
 #[tauri::command]
-pub fn stop_server(st: State<AppState>) -> Result<ServerStatus, String> {
+pub fn stop_server(app: AppHandle, st: State<AppState>) -> Result<ServerStatus, String> {
     st.stop_requested.store(true, Ordering::SeqCst);
     let pid = *st.pid.lock().unwrap();
     if let Some(pid) = pid {
@@ -216,6 +222,7 @@ pub fn stop_server(st: State<AppState>) -> Result<ServerStatus, String> {
         *st.pid.lock().unwrap() = None;
         *st.server_url.lock().unwrap() = None;
     }
+    state::refresh_tray(&app, false);
     Ok(state::status_of(&st))
 }
 

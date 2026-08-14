@@ -40,8 +40,29 @@ const confirmingStop = ref(false);
 const autoRestartCount = ref(0);
 const MAX_AUTO_RESTART = 3;
 
+const installingNode = ref(false);
+const installingDsh = ref(false);
+const verifying = ref(false);
+const checkingUpdate = ref(false);
+const latestVersion = ref<string | null>(null);
+
+const updateAvailable = computed(() => {
+  if (!env.value?.dshInstalled || !env.value.dshVersion || !latestVersion.value) return false;
+  return latestVersion.value !== env.value.dshVersion;
+});
+
+const isLatest = computed(() => {
+  return (
+    !!env.value?.dshInstalled &&
+    !!latestVersion.value &&
+    latestVersion.value === env.value.dshVersion
+  );
+});
+
 const unlisteners: UnlistenFn[] = [];
 let pollTimer: number | undefined;
+let versionTimer: number | undefined;
+let lastTrayRunning: boolean | null = null;
 
 const phaseText: Record<string, string> = {
   stopped: "已停止",
@@ -77,8 +98,17 @@ async function refreshStatus() {
     server.value = await invoke<ServerStatus>("server_status");
     if (server.value.phase !== "external") confirmingStop.value = false;
     if (server.value.phase === "running") autoRestartCount.value = 0;
+    syncTray();
   } catch {
     /* 忽略瞬时错误 */
+  }
+}
+
+function syncTray() {
+  const running = server.value.phase !== "stopped";
+  if (running !== lastTrayRunning) {
+    lastTrayRunning = running;
+    invoke("update_tray_state", { running }).catch(() => {});
   }
 }
 
@@ -87,32 +117,60 @@ async function refreshAll() {
 }
 
 async function installNode() {
-  const r = await wrap("正在安装 Node.js…", () => invoke<EnvInfo>("install_node"));
-  if (r) env.value = r;
+  installingNode.value = true;
+  try {
+    const r = await wrap("正在安装 Node.js…", () => invoke<EnvInfo>("install_node"));
+    if (r) env.value = r;
+  } finally {
+    installingNode.value = false;
+  }
 }
 
 async function installDsh() {
-  const r = await wrap("正在安装 DeepSeek Harness…", () =>
-    invoke<EnvInfo>("install_dsh"),
-  );
-  if (r) env.value = r;
+  installingDsh.value = true;
+  try {
+    const r = await wrap("正在安装 DeepSeek Harness…", () =>
+      invoke<EnvInfo>("install_dsh"),
+    );
+    if (r) env.value = r;
+  } finally {
+    installingDsh.value = false;
+  }
 }
 
 async function updateDsh() {
-  const r = await wrap("正在更新 DeepSeek Harness…", () =>
-    invoke<EnvInfo>("update_dsh"),
-  );
-  if (r) env.value = r;
+  installingDsh.value = true;
+  try {
+    const r = await wrap("正在更新 DeepSeek Harness…", () =>
+      invoke<EnvInfo>("update_dsh"),
+    );
+    if (r) {
+      env.value = r;
+      checkLatest();
+    }
+  } finally {
+    installingDsh.value = false;
+  }
 }
 
 async function verifyDsh() {
-  const r = await wrap("正在校验…", () => invoke<string>("verify_dsh"));
-  if (r) notice.value = r;
+  verifying.value = true;
+  try {
+    const r = await wrap("正在校验…", () => invoke<string>("verify_dsh"));
+    if (r) notice.value = r;
+  } finally {
+    verifying.value = false;
+  }
 }
 
 async function startServer() {
   autoRestartCount.value = 0;
   const r = await wrap("正在启动…", () => invoke<ServerStatus>("start_server"));
+  if (r) server.value = r;
+}
+
+async function doStop() {
+  const r = await wrap("正在停止…", () => invoke<ServerStatus>("stop_server"));
   if (r) server.value = r;
 }
 
@@ -122,8 +180,12 @@ async function stopServer() {
     return;
   }
   confirmingStop.value = false;
-  const r = await wrap("正在停止…", () => invoke<ServerStatus>("stop_server"));
-  if (r) server.value = r;
+  await doStop();
+}
+
+async function stopServerTray() {
+  confirmingStop.value = false;
+  await doStop();
 }
 
 async function openUrl() {
@@ -152,6 +214,7 @@ async function saveSettings() {
   if (r) {
     settings.value = r;
     notice.value = "设置已保存";
+    showSettings.value = false;
   }
 }
 
@@ -163,6 +226,17 @@ async function toggleAutostart() {
   );
   if (r !== undefined && settings.value) {
     settings.value.autostart = r;
+  }
+}
+
+async function checkLatest(showSpinner = false) {
+  if (showSpinner) checkingUpdate.value = true;
+  try {
+    latestVersion.value = await invoke<string | null>("check_latest_version");
+  } catch {
+    /* 忽略 */
+  } finally {
+    if (showSpinner) checkingUpdate.value = false;
   }
 }
 
@@ -197,18 +271,21 @@ onMounted(async () => {
   unlisteners.push(
     await listen<string>("tray-action", (e) => {
       if (e.payload === "start") startServer();
-      else if (e.payload === "stop") stopServer();
+      else if (e.payload === "stop") stopServerTray();
       else if (e.payload === "open") openUrl();
     }),
   );
 
   await Promise.all([refreshAll(), loadSettings(), refreshLogs()]);
   pollTimer = window.setInterval(refreshStatus, 3000);
+  checkLatest();
+  versionTimer = window.setInterval(checkLatest, 5 * 60 * 1000);
 });
 
 onUnmounted(() => {
   unlisteners.forEach((u) => u());
   if (pollTimer) window.clearInterval(pollTimer);
+  if (versionTimer) window.clearInterval(versionTimer);
 });
 
 const logBox = ref<HTMLElement | null>(null);
@@ -230,9 +307,13 @@ function autoScroll() {
         </div>
       </div>
       <div class="top-actions">
-        <button class="ghost" @click="showSettings = !showSettings">设置</button>
+        <button class="ghost" @click="showSettings = true">设置</button>
       </div>
     </header>
+
+    <div v-if="installingNode || installingDsh" class="progress-track">
+      <div class="progress-bar"></div>
+    </div>
 
     <p v-if="error" class="banner error">{{ error }}</p>
     <p v-if="notice" class="banner notice">{{ notice }}</p>
@@ -244,7 +325,7 @@ function autoScroll() {
         <ul class="kv">
           <li>
             <span>Node.js</span>
-            <b :class="env?.found ? 'ok' : 'bad'">{{ env?.found ? `已安装 v${env?.version}` : "未检测到" }}</b>
+            <b :class="env?.found ? 'ok' : 'bad'">{{ env?.found ? `已安装 ${env?.version}` : "未检测到" }}</b>
           </li>
           <li>
             <span>安装路径</span>
@@ -253,7 +334,9 @@ function autoScroll() {
         </ul>
         <div class="row">
           <button @click="refreshEnv">重新检测</button>
-          <button v-if="env && !env.found" class="primary" @click="installNode">一键安装 Node.js</button>
+          <button v-if="env && !env.found" class="primary" :disabled="installingNode" @click="installNode">
+            {{ installingNode ? "正在安装中…" : "一键安装 Node.js" }}
+          </button>
         </div>
       </div>
 
@@ -275,11 +358,22 @@ function autoScroll() {
             <code>{{ env?.installPrefix ?? "—" }}</code>
           </li>
         </ul>
+        <p v-if="updateAvailable" class="hint update">发现新版本 {{ latestVersion }}（当前 {{ env?.dshVersion }}）</p>
+        <p v-else-if="isLatest" class="hint good">当前已是最新版本（{{ latestVersion }}）</p>
         <p class="hint">Harness 安装到程序独立目录（见“安装目录”），与系统全局 npm 隔离，更稳定。</p>
         <div class="row">
-          <button v-if="env && !env.dshInstalled" class="primary" @click="installDsh">安装 Harness</button>
-          <button v-else @click="updateDsh">更新到最新</button>
-          <button @click="verifyDsh">校验安装</button>
+          <button v-if="env && !env.dshInstalled" class="primary" :disabled="installingDsh" @click="installDsh">
+            {{ installingDsh ? "正在安装中…" : "安装 Harness" }}
+          </button>
+          <template v-else>
+            <button v-if="updateAvailable" class="primary" :disabled="installingDsh" @click="updateDsh">
+              {{ installingDsh ? "正在更新中…" : `更新到 ${latestVersion}` }}
+            </button>
+            <button v-else :disabled="checkingUpdate" @click="checkLatest(true)">
+              {{ checkingUpdate ? "检查中…" : "检查更新" }}
+            </button>
+          </template>
+          <button :disabled="verifying" @click="verifyDsh">{{ verifying ? "校验中…" : "校验安装" }}</button>
         </div>
       </div>
 
@@ -303,39 +397,45 @@ function autoScroll() {
       </div>
     </section>
 
-    <section v-if="showSettings && settings" class="card settings">
-      <h2>设置</h2>
-      <div class="form">
-        <label>
-          <span>端口</span>
-          <input v-model.number="settings!.port" type="number" min="0" max="65535" />
-        </label>
-        <label>
-          <span>npm 镜像源</span>
-          <input v-model="settings!.registry" type="text" placeholder="https://registry.npmjs.org" />
-        </label>
-        <label>
-          <span>工作目录（可选）</span>
-          <input v-model="settings!.workspaceDir" type="text" placeholder="留空使用默认目录" />
-        </label>
-        <label class="check">
-          <input v-model="settings!.autostart" type="checkbox" @change="toggleAutostart" />
-          <span>开机自启本程序</span>
-        </label>
-        <label class="check">
-          <input v-model="settings!.autoStartServer" type="checkbox" />
-          <span>启动程序时自动启动服务器</span>
-        </label>
-        <label class="check">
-          <input v-model="settings!.autoRestart" type="checkbox" />
-          <span>服务器异常退出后自动重启</span>
-        </label>
+    <div v-if="showSettings && settings" class="modal-backdrop" @click.self="showSettings = false">
+      <div class="modal">
+        <div class="modal-head">
+          <h2>设置</h2>
+          <button class="ghost small" @click="showSettings = false">✕</button>
+        </div>
+        <div class="form">
+          <label>
+            <span>端口</span>
+            <input v-model.number="settings.port" type="number" min="0" max="65535" />
+          </label>
+          <label>
+            <span>npm 镜像源</span>
+            <input v-model="settings.registry" type="text" placeholder="https://registry.npmjs.org" />
+          </label>
+          <label>
+            <span>工作目录（可选）</span>
+            <input v-model="settings.workspaceDir" type="text" placeholder="留空使用默认目录" />
+          </label>
+          <label class="check">
+            <input v-model="settings.autostart" type="checkbox" @change="toggleAutostart" />
+            <span>开机自启本程序</span>
+          </label>
+          <label class="check">
+            <input v-model="settings.autoStartServer" type="checkbox" />
+            <span>启动程序时自动启动服务器</span>
+          </label>
+          <label class="check">
+            <input v-model="settings.autoRestart" type="checkbox" />
+            <span>服务器异常退出后自动重启</span>
+          </label>
+        </div>
+        <div class="row">
+          <button class="primary" @click="saveSettings">保存设置</button>
+          <button class="ghost" @click="showSettings = false">取消</button>
+        </div>
+        <p class="hint">npm 镜像源在安装/更新 Harness 时生效；国内网络慢可改为 https://registry.npmmirror.com</p>
       </div>
-      <div class="row">
-        <button class="primary" @click="saveSettings">保存设置</button>
-      </div>
-      <p class="hint">npm 镜像源在安装/更新 Harness 时生效；国内网络慢可改为 https://registry.npmmirror.com</p>
-    </section>
+    </div>
 
     <section class="card logs">
       <div class="logs-head">

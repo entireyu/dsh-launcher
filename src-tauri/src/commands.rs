@@ -146,6 +146,38 @@ pub async fn verify_dsh() -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+pub async fn check_latest_version(st: State<'_, AppState>) -> Result<Option<String>, String> {
+    let shared = Shared::from_state(&st);
+    let registry = shared.settings.lock().unwrap().registry.trim().to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let env = state::detect_env();
+        let Some(node) = env.node_path else {
+            return Ok(None);
+        };
+        let Some(cli) = state::npm_cli(&node) else {
+            return Ok(None);
+        };
+        let mut args: Vec<String> = vec![
+            cli.to_string_lossy().to_string(),
+            "view".to_string(),
+            "@deepseek-ai/dsh".to_string(),
+            "version".to_string(),
+        ];
+        if !registry.is_empty() {
+            args.push("--registry".to_string());
+            args.push(registry);
+        }
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        match state::run_output(&node, &arg_refs) {
+            Ok(v) => Ok(Some(v.trim().to_string())),
+            Err(_) => Ok(None),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatus, String> {
     if shared.pid.lock().unwrap().is_some() {
         return Err("服务器已在运行".to_string());
@@ -315,6 +347,11 @@ pub async fn server_status(st: State<'_, AppState>) -> Result<ServerStatus, Stri
     tauri::async_runtime::spawn_blocking(move || state::status_from(&shared.pid, &shared.url, port))
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_tray_state(app: AppHandle, running: bool) {
+    state::refresh_tray(&app, running);
 }
 
 #[tauri::command]

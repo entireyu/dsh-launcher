@@ -85,15 +85,20 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<tauri::tray::TrayIcon> {
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main(app);
+        }))
         .invoke_handler(tauri::generate_handler![
             commands::detect_env,
             commands::install_node,
             commands::install_dsh,
             commands::update_dsh,
             commands::verify_dsh,
+            commands::check_latest_version,
             commands::start_server,
             commands::stop_server,
             commands::server_status,
+            commands::update_tray_state,
             commands::get_settings,
             commands::save_settings,
             commands::set_autostart,

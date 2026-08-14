@@ -14,8 +14,8 @@
       {
         "label": "main",
         "title": "DeepSeek Harness 助手",
-        "width": 920,
-        "height": 660,
+        "width": 1080,
+        "height": 720,
         "minWidth": 720,
         "minHeight": 520,
         "visible": false,

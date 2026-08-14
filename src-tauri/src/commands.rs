@@ -135,7 +135,7 @@ fn verify_dsh_inner() -> Result<String, String> {
     let node = env.node_path.clone().ok_or("未检测到 Node.js。".to_string())?;
     let bin = state::resolve_dsh_bin(&env).ok_or("未安装 DeepSeek Harness。".to_string())?;
     let version = state::run_output(&node, &[bin.to_str().unwrap_or(""), "--version"])?;
-    state::run_output(&node, &[bin.to_str().unwrap_or(""), "--dump-default-config"])?;
+    state::run_output(&node, &[bin.to_str().unwrap_or(""), "web", "--dump-default-config"])?;
     Ok(format!("DeepSeek Harness {version} 安装正常，可正常启动"))
 }
 

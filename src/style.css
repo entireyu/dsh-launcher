@@ -63,6 +63,11 @@ body {
   font-size: 12px;
 }
 
+.brand .sub.en,
+.flow-brand .sub.en {
+  letter-spacing: 0.08em;
+}
+
 .dot {
   width: 12px;
   height: 12px;
@@ -392,4 +397,127 @@ button.small {
 .logbox .empty {
   color: var(--muted);
   opacity: 0.5;
+}
+
+.flow {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.flow-card {
+  width: 100%;
+  max-width: 540px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.flow-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.flow-brand h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.flow-brand .sub {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.flow-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.flow-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+button.link {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  text-decoration: underline;
+  padding: 4px;
+}
+
+.embed {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+}
+
+.embed-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+  background: #fff;
+}
+
+.embed-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted);
+}
+
+.fab {
+  position: fixed;
+  right: 20px;
+  bottom: 72px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.fab-btn {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  font-size: 20px;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(79, 140, 255, 0.5);
+}
+
+.fab-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.fab-menu button {
+  text-align: left;
+  white-space: nowrap;
 }

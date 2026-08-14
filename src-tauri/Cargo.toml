@@ -1,9 +1,14 @@
 [package]
 name = "dsh-launcher"
 version = "0.1.1"
-description = "DeepSeek Harness 一键安装与启动助手"
+description = "鲸仔（Whalito）— DeepSeek Harness 一键安装与启动桌面助手"
 authors = ["dsh-launcher"]
 edition = "2021"
+
+# exe 二进制名（用户可见），与内部 crate 名 dsh-launcher 解耦
+[[bin]]
+name = "Whalito"
+path = "src/main.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -20,9 +25,11 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-ureq = { version = "2", default-features = false }
+ureq = { version = "2", default-features = false, features = ["tls"] }
+zip = "2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

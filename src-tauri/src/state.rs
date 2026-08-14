@@ -1,11 +1,13 @@
 use std::{
     collections::VecDeque,
+    io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
@@ -14,6 +16,9 @@ use tauri::tray::TrayIcon;
 use tauri::{AppHandle, Emitter, Manager};
 
 pub const LOG_CAP: usize = 2000;
+
+/// Node.js 最低可用版本（含）：< 22.19.0 视为不可用。
+pub const MIN_NODE_VERSION: (u64, u64, u64) = (22, 19, 0);
 
 #[derive(Default)]
 pub struct AppState {
@@ -34,9 +39,10 @@ pub struct Settings {
     pub port: u16,
     pub registry: String,
     pub autostart: bool,
-    pub auto_start_server: bool,
     pub auto_restart: bool,
     pub workspace_dir: Option<String>,
+    /// 用户自定义的 Node.js 安装目录（便携版），检测时优先使用该目录下的 node.exe。
+    pub node_dir: Option<String>,
 }
 
 impl Default for Settings {
@@ -45,9 +51,9 @@ impl Default for Settings {
             port: 3080,
             registry: "https://registry.npmjs.org".to_string(),
             autostart: false,
-            auto_start_server: false,
             auto_restart: true,
             workspace_dir: None,
+            node_dir: None,
         }
     }
 }
@@ -63,6 +69,12 @@ pub struct EnvInfo {
     pub dsh_installed: bool,
     pub dsh_version: Option<String>,
     pub dsh_bin: Option<String>,
+    /// 是否已安装且版本 >= MIN_NODE_VERSION。
+    pub node_version_ok: bool,
+    /// 是否已安装但版本不可用（缺失 / 解析失败 / 低于最低版本）。
+    pub node_too_old: bool,
+    pub nvm_found: bool,
+    pub nvm_path: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -84,6 +96,10 @@ impl Default for EnvInfo {
             dsh_installed: false,
             dsh_version: None,
             dsh_bin: None,
+            node_version_ok: false,
+            node_too_old: false,
+            nvm_found: false,
+            nvm_path: None,
         }
     }
 }
@@ -96,6 +112,21 @@ impl Default for ServerStatus {
             pid: None,
         }
     }
+}
+
+/// 解析 `v22.19.0` / `22.19.0` 这类版本号；非法输入返回 None。
+pub fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
+    let s = v.trim().trim_start_matches('v');
+    let mut parts = s.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next()?.parse::<u64>().ok()?;
+    let patch = parts
+        .next()
+        .map(|p| p.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
+        .filter(|p| !p.is_empty())
+        .and_then(|p| p.parse::<u64>().ok())
+        .unwrap_or(0);
+    Some((major, minor, patch))
 }
 
 pub fn run_output(program: &str, args: &[&str]) -> Result<String, String> {
@@ -247,6 +278,7 @@ pub fn status_from(
     }
 }
 
+#[cfg(windows)]
 pub fn find_pid_on_port(port: u16) -> Option<u32> {
     let out = run_output("netstat", &["-ano", "-p", "tcp"]).ok()?;
     let suffix = format!(":{port}");
@@ -262,6 +294,11 @@ pub fn find_pid_on_port(port: u16) -> Option<u32> {
             }
         }
     }
+    None
+}
+
+#[cfg(not(windows))]
+pub fn find_pid_on_port(_port: u16) -> Option<u32> {
     None
 }
 
@@ -302,6 +339,94 @@ pub fn resolve_dsh_bin(env: &EnvInfo) -> Option<PathBuf> {
     env.dsh_bin.as_ref().map(PathBuf::from)
 }
 
+/// 探测 nvm-windows：PATH → NVM_HOME → %APPDATA%\nvm。返回 nvm 可执行文件路径。
+pub fn detect_nvm() -> Option<String> {
+    if let Ok(out) = run_output("where.exe", &["nvm"]) {
+        if let Some(first) = out.lines().next() {
+            let s = first.trim();
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    if let Ok(home) = std::env::var("NVM_HOME") {
+        let p = Path::new(&home).join("nvm.exe");
+        if p.exists() {
+            return Some(p.to_string_lossy().to_string());
+        }
+    }
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let p = Path::new(&appdata).join("nvm").join("nvm.exe");
+        if p.exists() {
+            return Some(p.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+/// 从 nodejs.org 的 index.json 解析最新的 22.x 版本号（如 "22.19.0"）。失败返回 None。
+pub fn latest_node_lts_major22() -> Option<String> {
+    let resp = ureq::get("https://nodejs.org/dist/index.json")
+        .timeout(Duration::from_secs(20))
+        .call()
+        .ok()?;
+    let mut reader = resp.into_reader();
+    let mut body = String::new();
+    reader.read_to_string(&mut body).ok()?;
+    let arr: serde_json::Value = serde_json::from_str(&body).ok()?;
+    for item in arr.as_array()? {
+        let v = item.get("version")?.as_str()?;
+        if v.starts_with("v22.") {
+            return Some(v.trim_start_matches('v').to_string());
+        }
+    }
+    None
+}
+
+/// 依据 npm 镜像源推断 Node 分发下载基地址（国内 npmmirror 自动切换）。
+pub fn node_dist_base(registry: &str) -> String {
+    if registry.contains("npmmirror") {
+        "https://npmmirror.com/mirrors/node".to_string()
+    } else {
+        "https://nodejs.org/dist".to_string()
+    }
+}
+
+pub fn download_file(url: &str, dest: &Path) -> Result<(), String> {
+    let resp = ureq::get(url)
+        .timeout(Duration::from_secs(600))
+        .call()
+        .map_err(|e| format!("下载失败：{e}"))?;
+    let mut reader = resp.into_reader();
+    let mut file = std::fs::File::create(dest).map_err(|e| format!("创建文件失败：{e}"))?;
+    std::io::copy(&mut reader, &mut file).map_err(|e| format!("写入失败：{e}"))?;
+    Ok(())
+}
+
+pub fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(zip_path).map_err(|e| format!("打开压缩包失败：{e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("解析压缩包失败：{e}"))?;
+    std::fs::create_dir_all(dest).map_err(|e| format!("创建目录失败：{e}"))?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| format!("读取压缩包条目失败：{e}"))?;
+        // enclosed_name 防止 zip-slip 路径穿越
+        let Some(rel) = entry.enclosed_name() else {
+            continue;
+        };
+        let out = dest.join(rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out).ok();
+        } else {
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            let mut o = std::fs::File::create(&out).map_err(|e| format!("创建文件失败：{e}"))?;
+            std::io::copy(&mut entry, &mut o).map_err(|e| format!("解压失败：{e}"))?;
+        }
+    }
+    Ok(())
+}
+
 pub fn refresh_tray(app: &AppHandle, running: bool) {
     let st = app.state::<AppState>();
     let start_item = st.tray_start.lock().unwrap().clone();
@@ -315,18 +440,32 @@ pub fn refresh_tray(app: &AppHandle, running: bool) {
     }
 }
 
-pub fn detect_env() -> EnvInfo {
+/// 检测环境。`node_dir` 为用户自定义的 Node 目录（优先于 PATH / Program Files）。
+pub fn detect_env(node_dir: Option<&str>) -> EnvInfo {
     let version_on_path = run_output("node", &["--version"]).ok();
 
-    let node_path = run_output("where.exe", &["node"])
-        .ok()
-        .and_then(|o| o.lines().next().map(|s| s.trim().to_string()))
-        .filter(|s| !s.is_empty())
+    let node_path = node_dir
+        .map(|dir| {
+            let p = Path::new(dir).join("node.exe");
+            p.exists().then(|| p.to_string_lossy().to_string())
+        })
+        .flatten()
+        .or_else(|| {
+            run_output("where.exe", &["node"])
+                .ok()
+                .and_then(|o| o.lines().next().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+        })
         .or_else(fallback_node_path);
 
     let node = node_path.clone().unwrap_or_else(|| "node".to_string());
 
-    let version = version_on_path.or_else(|| run_output(&node, &["--version"]).ok());
+    let version = if node_path.is_some() {
+        run_output(&node, &["--version"]).ok()
+    } else {
+        None
+    }
+    .or(version_on_path);
 
     let npm_prefix = npm_cli(&node)
         .and_then(|cli| run_output(&node, &[cli.to_str().unwrap_or(""), "prefix", "-g"]).ok())
@@ -355,8 +494,15 @@ pub fn detect_env() -> EnvInfo {
         }
     }
 
+    let found = node_path.is_some() && version.is_some();
+    let version_tuple = version.as_deref().and_then(parse_semver);
+    let node_version_ok = found && version_tuple.is_some_and(|v| v >= MIN_NODE_VERSION);
+    let node_too_old = found && !node_version_ok;
+
+    let nvm_path = detect_nvm();
+
     EnvInfo {
-        found: node_path.is_some() && version.is_some(),
+        found,
         version,
         node_path,
         npm_prefix,
@@ -364,6 +510,10 @@ pub fn detect_env() -> EnvInfo {
         dsh_installed: dsh_bin_path.is_some(),
         dsh_version,
         dsh_bin: dsh_bin_path.map(|p| p.to_string_lossy().to_string()),
+        node_version_ok,
+        node_too_old,
+        nvm_found: nvm_path.is_some(),
+        nvm_path,
     }
 }
 
@@ -421,4 +571,26 @@ pub fn set_autostart(_enabled: bool) -> Result<(), String> {
 #[allow(dead_code)]
 fn _unused_order() -> Ordering {
     Ordering::SeqCst
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_semver() {
+        assert_eq!(parse_semver("v22.19.0"), Some((22, 19, 0)));
+        assert_eq!(parse_semver("22.19.0"), Some((22, 19, 0)));
+        assert_eq!(parse_semver("20.0.0"), Some((20, 0, 0)));
+        assert_eq!(parse_semver("22.19"), Some((22, 19, 0)));
+        assert_eq!(parse_semver("abc"), None);
+        assert_eq!(parse_semver(""), None);
+    }
+
+    #[test]
+    fn compares_against_min() {
+        assert!(parse_semver("v22.19.0").unwrap() >= MIN_NODE_VERSION);
+        assert!(parse_semver("v22.20.1").unwrap() >= MIN_NODE_VERSION);
+        assert!(parse_semver("v20.0.0").unwrap() < MIN_NODE_VERSION);
+    }
 }

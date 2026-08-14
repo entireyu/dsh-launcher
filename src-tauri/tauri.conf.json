@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DeepSeek Harness 助手",
+  "productName": "鲸仔",
   "version": "0.1.1",
   "identifier": "com.deepseek.dsh-launcher",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "DeepSeek Harness 助手",
+        "title": "鲸仔 Whalito",
         "width": 1080,
         "height": 720,
         "minWidth": 720,

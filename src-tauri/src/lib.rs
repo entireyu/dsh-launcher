@@ -88,15 +88,21 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main(app);
         }))
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::detect_env,
             commands::install_node,
+            commands::upgrade_node,
+            commands::install_node_nvm,
+            commands::install_node_portable,
+            commands::pick_node_dir,
             commands::install_dsh,
             commands::update_dsh,
             commands::verify_dsh,
             commands::check_latest_version,
             commands::start_server,
             commands::stop_server,
+            commands::restart_server,
             commands::server_status,
             commands::update_tray_state,
             commands::get_settings,
@@ -109,7 +115,6 @@ pub fn run() {
             let handle = app.handle().clone();
             let settings = state::load_settings(&handle);
             let autostart_flag = std::env::args().any(|a| a == "--autostart");
-            let auto_start_server = settings.auto_start_server;
 
             {
                 let st = app.state::<AppState>();
@@ -124,16 +129,6 @@ pub fn run() {
 
             if !autostart_flag {
                 show_main(&handle);
-            }
-
-            if auto_start_server {
-                let h = handle.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    let st = h.state::<AppState>();
-                    let shared = commands::Shared::from_state(&st);
-                    let _ = commands::start_server_impl(&h, &shared);
-                });
             }
 
             Ok(())

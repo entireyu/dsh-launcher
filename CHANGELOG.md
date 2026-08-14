@@ -4,7 +4,7 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.2.0] - 2026-08-14
 
 ### 新增
 - 引导式主流程：启动即进入 loading，自动检测 Node/dsh/服务器状态，按状态进入「装 Node / 装 dsh / 启动服务器」并最终在应用内嵌打开 Harness 页面
@@ -12,6 +12,13 @@
 - Node 版本门槛：要求 Node ≥ 22.19.0，缺失或过低统一进入安装引导
 - 安装 Node 三种方式：nvm 安装切换、winget 一键（安装/升级）、自定义目录便携版（下载 zip 解压）
 - 服务器启动改为「等待就绪」（轮询健康检查，超时报错），不再依赖 stdout URL 抽取
+- 服务器一键重启
+- 单实例运行：二次启动时唤起已有窗口
+- Harness 版本更新检查：自动比对最新版本并提示可更新 / 已最新
+- 托盘状态同步、设置面板改为弹窗、安装 / 更新 / 校验进度提示
+
+### 变更
+- 品牌重构：应用更名「鲸仔（Whalito）」，更新 logo 与全套图标，二进制名改为 Whalito
 
 ### 修复
 - 校验安装改用 `dsh web --dump-default-config`，修复 `--profile` 报错
@@ -38,6 +45,6 @@
 - 安装 / 启动等阻塞命令改为异步，修复点击安装后界面卡死
 - 探测端口上外部已运行的 DSH 服务器，修复误报已停止
 
-[未发布]: https://github.com/entireyu/dsh-launcher/compare/v0.1.1...main
+[0.2.0]: https://github.com/entireyu/dsh-launcher/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/entireyu/dsh-launcher/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/entireyu/dsh-launcher/releases/tag/v0.1.0

@@ -45,6 +45,6 @@
 - 安装 / 启动等阻塞命令改为异步，修复点击安装后界面卡死
 - 探测端口上外部已运行的 DSH 服务器，修复误报已停止
 
-[0.2.0]: https://github.com/entireyu/dsh-launcher/compare/v0.1.1...v0.2.0
-[0.1.1]: https://github.com/entireyu/dsh-launcher/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/entireyu/dsh-launcher/releases/tag/v0.1.0
+[0.2.0]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/entireyu/dsh-whalito-desk/releases/tag/v0.1.0

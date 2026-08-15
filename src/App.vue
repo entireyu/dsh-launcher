@@ -30,6 +30,7 @@ interface Settings {
   autoRestart: boolean;
   workspaceDir: string | null;
   nodeDir: string | null;
+  petEnabled: boolean;
 }
 
 const env = ref<EnvInfo | null>(null);
@@ -338,6 +339,17 @@ async function toggleAutostart() {
   }
 }
 
+async function togglePet() {
+  if (!settings.value) return;
+  const enabled = settings.value.petEnabled;
+  const r = await wrap("正在更新桌宠…", () =>
+    invoke<boolean>("pet_set_enabled", { enabled }),
+  );
+  if (r !== undefined && settings.value) {
+    settings.value.petEnabled = r;
+  }
+}
+
 async function checkLatest(showSpinner = false) {
   if (showSpinner) checkingUpdate.value = true;
   try {
@@ -440,6 +452,18 @@ onMounted(async () => {
       else if (e.payload === "open") {
         if (server.value.url) view.value = "embed";
         else view.value = "panel";
+      }
+    }),
+  );
+  // 桌宠请求唤起对应会话：切到内嵌视图并重载 iframe，
+  // 让待处理的审批 / 提问随前端重连自动浮出。
+  unlisteners.push(
+    await listen<string | null>("pet-open-session", () => {
+      if (server.value.url) {
+        view.value = "embed";
+        embedNonce.value += 1;
+      } else {
+        view.value = "panel";
       }
     }),
   );
@@ -708,6 +732,10 @@ function autoScroll() {
             <label class="check">
               <input v-model="settings.autoRestart" type="checkbox" />
               <span>服务器异常退出后自动重启</span>
+            </label>
+            <label class="check">
+              <input v-model="settings.petEnabled" type="checkbox" @change="togglePet" />
+              <span>显示桌宠</span>
             </label>
           </div>
           <div class="row">

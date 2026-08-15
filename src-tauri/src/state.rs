@@ -31,6 +31,10 @@ pub struct AppState {
     pub tray: Mutex<Option<TrayIcon>>,
     pub tray_start: Mutex<Option<MenuItem<tauri::Wry>>>,
     pub tray_stop: Mutex<Option<MenuItem<tauri::Wry>>>,
+    /// 桌宠读取器：true 表示请求停止（应用退出时置位）。
+    pub pet_stop: Arc<AtomicBool>,
+    /// 最近一次桌宠状态快照（JSON），供 pet_status 命令即时返回。
+    pub pet_snapshot: Arc<Mutex<Option<serde_json::Value>>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -43,6 +47,13 @@ pub struct Settings {
     pub workspace_dir: Option<String>,
     /// 用户自定义的 Node.js 安装目录（便携版），检测时优先使用该目录下的 node.exe。
     pub node_dir: Option<String>,
+    /// 是否显示桌宠（托盘可切换）。
+    #[serde(default = "default_pet_enabled")]
+    pub pet_enabled: bool,
+}
+
+fn default_pet_enabled() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -54,6 +65,7 @@ impl Default for Settings {
             auto_restart: true,
             workspace_dir: None,
             node_dir: None,
+            pet_enabled: true,
         }
     }
 }

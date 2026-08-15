@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>鲸仔</title>
+    <style>
+      /* 透明桌宠窗口：body 必须透明，否则 Windows 上会露出白底。 */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="pet"></div>
+    <script type="module" src="/src/pet.ts"></script>
+  </body>
+</html>

@@ -1,4 +1,5 @@
 mod commands;
+mod pet;
 mod state;
 
 use std::sync::atomic::Ordering;
@@ -6,12 +7,12 @@ use std::sync::atomic::Ordering;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, WindowEvent,
+    Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 
 use state::AppState;
 
-fn show_main(app: &tauri::AppHandle) {
+pub(crate) fn show_main(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
@@ -24,6 +25,7 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<tauri::tray::TrayIcon> {
     let start = MenuItem::with_id(app, "start", "启动服务器", true, None::<&str>)?;
     let stop = MenuItem::with_id(app, "stop", "停止服务器", false, None::<&str>)?;
     let open = MenuItem::with_id(app, "open", "在浏览器打开", true, None::<&str>)?;
+    let pet = MenuItem::with_id(app, "pet", "显示 / 隐藏桌宠", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
@@ -32,6 +34,7 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<tauri::tray::TrayIcon> {
             &start,
             &stop,
             &open,
+            &pet,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
@@ -57,8 +60,14 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<tauri::tray::TrayIcon> {
             "open" => {
                 let _ = app.emit("tray-action", "open");
             }
+            "pet" => {
+                let st = app.state::<AppState>();
+                let enabled = !st.settings.lock().unwrap().pet_enabled;
+                let _ = pet::set_enabled(app, enabled);
+            }
             "quit" => {
                 app.state::<AppState>().quitting.store(true, Ordering::SeqCst);
+                app.state::<AppState>().pet_stop.store(true, Ordering::SeqCst);
                 app.exit(0);
             }
             _ => {}
@@ -110,6 +119,10 @@ pub fn run() {
             commands::set_autostart,
             commands::open_url,
             commands::get_logs,
+            pet::pet_status,
+            pet::pet_open_session,
+            pet::pet_respond,
+            pet::pet_set_enabled,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -126,6 +139,42 @@ pub fn run() {
                 let st = app.state::<AppState>();
                 *st.tray.lock().unwrap() = Some(tray);
             }
+
+            // 桌宠窗口：无边框、透明、置顶、不进任务栏。
+            let pet_window = WebviewWindowBuilder::new(&handle, "pet", WebviewUrl::App("pet.html".into()))
+                .title("鲸仔")
+                .inner_size(200.0, 250.0)
+                .resizable(false)
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .shadow(false)
+                .build()?;
+
+            // 定位到主屏右下角。
+            if let Ok(Some(monitor)) = pet_window.primary_monitor() {
+                let size = monitor.size();
+                let scale = monitor.scale_factor();
+                let margin = (16.0 * scale).round() as i32;
+                let w = (200.0 * scale).round() as i32;
+                let h = (250.0 * scale).round() as i32;
+                let x = (size.width as i32).saturating_sub(w).saturating_sub(margin);
+                let y = (size.height as i32).saturating_sub(h).saturating_sub(margin);
+                let _ = pet_window.set_position(tauri::PhysicalPosition::new(x, y));
+            }
+
+            let pet_enabled = {
+                let st = app.state::<AppState>();
+                let enabled = st.settings.lock().unwrap().pet_enabled;
+                enabled
+            };
+            if pet_enabled {
+                let _ = pet_window.show();
+            }
+
+            // 启动桌宠状态读取器（长生命周期后台线程）。
+            pet::spawn(handle.clone());
 
             if !autostart_flag {
                 show_main(&handle);

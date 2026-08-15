@@ -29,4 +29,13 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  // 4. 多入口：主面板 + 桌宠窗口。
+  build: {
+    rollupOptions: {
+      input: {
+        main: "index.html",
+        pet: "pet.html",
+      },
+    },
+  },
 }));

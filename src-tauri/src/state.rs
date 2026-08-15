@@ -20,6 +20,13 @@ pub const LOG_CAP: usize = 2000;
 /// Node.js 最低可用版本（含）：< 22.19.0 视为不可用。
 pub const MIN_NODE_VERSION: (u64, u64, u64) = (22, 19, 0);
 
+/// 测试构建开关（编译期）：build.rs 在 WHALITO_TEST_BUILD=1 时发出
+/// cfg(whalito_test)；生产构建无此 cfg，测试分支被编译器直接剔除（零残留）。
+pub const TEST_BUILD: bool = cfg!(whalito_test);
+
+/// DSH 服务器默认端口：生产 3080，测试构建 30080。
+pub const DEFAULT_PORT: u16 = if TEST_BUILD { 30080 } else { 3080 };
+
 #[derive(Default)]
 pub struct AppState {
     pub pid: Arc<Mutex<Option<u32>>>,
@@ -59,7 +66,7 @@ fn default_pet_enabled() -> bool {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            port: 3080,
+            port: DEFAULT_PORT,
             registry: "https://registry.npmjs.org".to_string(),
             autostart: false,
             auto_restart: true,

@@ -1,5 +1,6 @@
 mod commands;
 mod pet;
+mod settings_plugin;
 mod state;
 
 use std::sync::atomic::Ordering;
@@ -46,8 +47,15 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<tauri::tray::TrayIcon> {
         *st.tray_stop.lock().unwrap() = Some(stop.clone());
     }
 
+    // 悬浮提示：应用名称；测试构建末尾追加（测试版）标记。
+    let tooltip = if crate::state::TEST_BUILD {
+        "鲸仔 Whalito（测试版）"
+    } else {
+        "鲸仔 Whalito"
+    };
     let mut builder = TrayIconBuilder::with_id("main-tray")
         .menu(&menu)
+        .tooltip(tooltip)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main(app),
@@ -119,6 +127,8 @@ pub fn run() {
             commands::set_autostart,
             commands::open_url,
             commands::get_logs,
+            settings_plugin::sync_settings_plugin,
+            settings_plugin::bridge_diag,
             pet::pet_status,
             pet::pet_open_session,
             pet::pet_respond,
@@ -132,6 +142,16 @@ pub fn run() {
             {
                 let st = app.state::<AppState>();
                 *st.settings.lock().unwrap() = settings;
+            }
+
+            // 幂等同步鲸仔设置分区插件到 web profile（启动服务器前还会再同步一次）。
+            let _ = crate::settings_plugin::ensure_settings_plugin(&handle);
+
+            // 测试构建：窗口标题加标记，便于区分两个共存实例。
+            if crate::state::TEST_BUILD {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.set_title("鲸仔 Whalito（测试版）");
+                }
             }
 
             let tray = setup_tray(&handle)?;

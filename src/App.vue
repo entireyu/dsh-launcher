@@ -2,6 +2,8 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { dshOrigin, isWhalitoMessage, postToDsh, toPlain } from "./whalitoBridge";
+import type { WhalitoMessage, WhalitoSettings } from "./whalitoBridge";
 
 interface EnvInfo {
   found: boolean;
@@ -57,8 +59,9 @@ const stage = ref<"detecting" | "node" | "dsh" | "server">("detecting");
 const flowError = ref<string>("");
 const installStage = ref<string>("");
 
-const fabOpen = ref(false);
 const embedNonce = ref(0);
+const embedFrame = ref<HTMLIFrameElement | null>(null);
+let whalitoPingLogged = false;
 
 const stageText: Record<string, string> = {
   install: "正在安装…",
@@ -278,30 +281,116 @@ async function openUrl() {
 }
 
 function openEmbedded() {
-  fabOpen.value = false;
   view.value = "embed";
 }
 
-// 悬浮按钮动作
-async function fabStart() {
-  fabOpen.value = false;
-  await startServer();
-  embedNonce.value += 1;
+// ============ 与内嵌 DSH 页面"鲸仔"设置分区通信 ============
+function onEmbedLoad() {
+  pushSnapshot();
 }
-async function fabStop() {
-  fabOpen.value = false;
-  await doStop();
-  view.value = "panel";
+
+function pushSnapshot() {
+  // 注意：必须 toPlain 去响应式——Vue reactive Proxy 过不了 postMessage
+  // 的 structured clone（会抛 DataCloneError）；settings 未加载时也回握手。
+  const err = postToDsh(embedFrame.value, {
+    channel: "whalito",
+    type: "hello",
+    settings: settings.value ? toPlain(settings.value) : null,
+    status: toPlain(server.value),
+  });
+  if (err !== null) {
+    invoke("bridge_diag", { line: `推送快照失败：${err}` }).catch(() => {});
+  }
 }
-async function fabRestart() {
-  fabOpen.value = false;
-  await restartServer();
-  embedNonce.value += 1;
+
+function postWhalitoError(message: string) {
+  postToDsh(embedFrame.value, { channel: "whalito", type: "error", message });
 }
-function fabSettings() {
-  fabOpen.value = false;
-  view.value = "panel";
-  showSettings.value = true;
+
+function isPortValid(p: unknown): p is number {
+  return typeof p === "number" && Number.isInteger(p) && p >= 1 && p <= 65535;
+}
+
+async function handleWhalitoMessage(event: MessageEvent) {
+  const origin = dshOrigin(server.value.url);
+  if (origin !== null && event.origin !== origin) return;
+  if (!isWhalitoMessage(event.data)) return;
+  const msg: WhalitoMessage = event.data;
+
+  if (msg.type === "ping") {
+    if (!whalitoPingLogged) {
+      whalitoPingLogged = true;
+      logs.value.push("[系统] 鲸仔设置分区已连接（收到内嵌页握手请求）");
+      invoke("bridge_diag", { line: `收到 ping，origin=${event.origin}` }).catch(() => {});
+    }
+    pushSnapshot();
+    return;
+  }
+  if (msg.type !== "action") return;
+  const action = msg.action;
+  try {
+    if (action === "save-settings") {
+      const value = msg.value as WhalitoSettings | null;
+      if (!value || !isPortValid(value.port)) {
+        postWhalitoError("无效的端口（需要 1–65535 的整数）");
+        return;
+      }
+      const prevPort = settings.value?.port;
+      const r = await wrap("正在保存设置…", () =>
+        invoke<Settings>("save_settings", { value }),
+      );
+      if (!r) {
+        postWhalitoError(error.value || "保存设置失败");
+        return;
+      }
+      settings.value = r;
+      await wrap("正在更新开机自启…", () =>
+        invoke<boolean>("set_autostart", { enabled: r.autostart }),
+      );
+      await wrap("正在更新桌宠…", () =>
+        invoke<boolean>("pet_set_enabled", { enabled: r.petEnabled }),
+      );
+      settings.value = await invoke<Settings>("get_settings");
+      if (
+        prevPort !== undefined &&
+        r.port !== prevPort &&
+        (server.value.phase === "running" || server.value.phase === "external")
+      ) {
+        notice.value = "端口已变更，正在重启服务器…";
+        await restartServer();
+        embedNonce.value += 1;
+      }
+      pushSnapshot();
+      return;
+    }
+    if (action === "start") {
+      await startServer();
+      if (server.value.url) {
+        view.value = "embed";
+        embedNonce.value += 1;
+      }
+      pushSnapshot();
+      return;
+    }
+    if (action === "stop") {
+      await doStop();
+      view.value = "panel";
+      return;
+    }
+    if (action === "restart") {
+      await restartServer();
+      embedNonce.value += 1;
+      pushSnapshot();
+      return;
+    }
+    if (action === "focus-panel") {
+      goPanel();
+      return;
+    }
+    postWhalitoError(`未知动作：${action ?? ""}`);
+  } catch (e) {
+    postWhalitoError(typeof e === "string" ? e : String(e));
+  }
 }
 
 async function refreshLogs() {
@@ -325,6 +414,7 @@ async function saveSettings() {
     settings.value = r;
     notice.value = "设置已保存";
     showSettings.value = false;
+    pushSnapshot();
   }
 }
 
@@ -336,6 +426,7 @@ async function toggleAutostart() {
   );
   if (r !== undefined && settings.value) {
     settings.value.autostart = r;
+    pushSnapshot();
   }
 }
 
@@ -347,6 +438,7 @@ async function togglePet() {
   );
   if (r !== undefined && settings.value) {
     settings.value.petEnabled = r;
+    pushSnapshot();
   }
 }
 
@@ -467,6 +559,7 @@ onMounted(async () => {
       }
     }),
   );
+  window.addEventListener("message", handleWhalitoMessage);
 
   await Promise.all([loadSettings(), refreshLogs()]);
   pollTimer = window.setInterval(refreshStatus, 3000);
@@ -476,6 +569,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  window.removeEventListener("message", handleWhalitoMessage);
   unlisteners.forEach((u) => u());
   if (pollTimer) window.clearInterval(pollTimer);
   if (versionTimer) window.clearInterval(versionTimer);
@@ -492,19 +586,20 @@ function autoScroll() {
 <template>
   <!-- ============ 内嵌页面（单窗口） ============ -->
   <div v-if="view === 'embed'" class="embed">
-    <iframe v-if="server.url" :key="embedNonce" :src="server.url" class="embed-frame" />
+    <iframe
+      v-if="server.url"
+      ref="embedFrame"
+      :key="embedNonce"
+      :src="server.url"
+      class="embed-frame"
+      @load="onEmbedLoad"
+    />
     <div v-else class="embed-empty">
       <p>服务器未运行</p>
-      <button class="primary" @click="fabStart">启动服务器</button>
-    </div>
-    <div class="fab">
-      <button class="fab-btn" @click="fabOpen = !fabOpen">⚙</button>
-      <div v-if="fabOpen" class="fab-menu">
-        <button @click="goPanel">返回助手</button>
-        <button @click="fabStart">启动服务器</button>
-        <button @click="fabStop">停止服务器</button>
-        <button @click="fabRestart">重启服务器</button>
-        <button @click="fabSettings">打开设置</button>
+      <div class="row">
+        <button class="primary" @click="startServer">启动服务器</button>
+        <button @click="goPanel">返回鲸仔助手</button>
+        <button @click="showSettings = true">打开设置</button>
       </div>
     </div>
   </div>

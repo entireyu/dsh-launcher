@@ -4,6 +4,24 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 新增
+- DSH 设置面板内新增「鲸仔」分区：端口 / npm 镜像 / 开机自启 / 自动重启 / 工作目录 / Node 目录 / 桌宠开关，以及服务器启停 / 重启 / 返回鲸仔助手；与主窗口通过 postMessage 双向同步
+- 鲸仔设置分区插件（@entireyu/whalito-dsh-settings，内嵌于应用）在启动服务器前幂等同步到 DSH web profile（node_modules + cordis.patch.yml 标记块），不依赖 pnpm，不动 DSH 源码
+
+### 变更
+- 移除内嵌页右下角悬浮按钮（fab）及独立 Webview 遗留代码（embed.rs / inject.js）；服务器未运行时内嵌页提供「启动服务器 / 返回鲸仔助手 / 打开设置」
+- 在「鲸仔」分区保存端口变更后自动重启服务器生效
+- 安装包名改为英文 Whalito（productName 变更，安装目录随之变为 %LOCALAPPDATA%\Whalito）
+- 新增测试构建（pnpm tauri:build:test）：包名 Whalito-Test、标识符 com.deepseek.dsh-launcher.test、默认端口 30080、独立 DSH 数据目录 ~/.dsh-test，与生产包可共存
+- 「鲸仔」设置分区握手加固：未连接时每 2 秒重试 ping、放宽 WebView2 的 event.source 校验、父窗口在未加载设置时也回握手
+- 修复握手永远停留在「正在连接鲸仔…」的根因：postMessage 的 structured clone 不接受 Vue reactive Proxy，父窗口发送快照前改为 JSON 深拷贝（toPlain），并新增 %TEMP%\whalito-bridge.log 诊断通道
+- 托盘图标悬浮提示显示应用名称「鲸仔 Whalito」，测试版末尾追加「（测试版）」
+- 「鲸仔」设置分区更名为「鲸仔设置」，分区内容头部展示鲸仔应用 logo（64x64 PNG 以 data URI 内嵌，展示 32px/2x 密度），副标题「鲸仔（Whalito）桌面端设置」
+- 服务器运行中不再显示「启动服务器」按钮（停止/重启仅运行时显示）
+- npm 镜像源支持快速切换：一键切换 npmmirror（国内加速）/ npm 官方源并立即保存
+
 ## [0.2.0] - 2026-08-14
 
 ### 新增

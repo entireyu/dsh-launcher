@@ -62,6 +62,7 @@
 | 一键安装 Node.js | 支持 winget、nvm、自定义目录便携版 |
 | 安装 / 更新 Harness | 支持切换 npm 镜像源，国内更快 |
 | 服务器管理 | 一键启动 / 停止 / 重启，异常自动拉起 |
+| 鲸仔设置分区 | DSH 设置面板内直接管理鲸仔设置（端口 / 镜像 / 自启 / 桌宠等），取代悬浮按钮 |
 | 托盘常驻 | 最小化到托盘，支持开机自启 |
 | 实时日志 | 运行状态与输出实时可见 |
 
@@ -73,12 +74,14 @@
 
 ```
 src/                    # Vue 3 + TS 前端控制面板
+  whalitoBridge.ts      # 与内嵌 DSH 页面"鲸仔"设置分区的 postMessage 桥
 src-tauri/
   src/
     lib.rs              # 入口：托盘、窗口、命令注册
     state.rs            # 共享状态、配置、进程 / 日志 / 健康检查
     commands.rs         # 全部 Tauri 命令（检测 / 安装 / 启停 / 设置）
-    embed.rs            # 内嵌浏览器窗口
+    settings_plugin.rs  # 鲸仔设置分区插件同步（幂等写入 web profile）
+  whalito-dsh-settings/ # 内嵌的 DSH 客户端插件包（package.json / index.js / client.js）
   Cargo.toml
   tauri.conf.json
 ```
@@ -93,7 +96,14 @@ pnpm tauri dev        # 前端 dev server + Rust debug
 ### 打包
 
 ```bash
-pnpm tauri build      # 产出 NSIS 安装器（src-tauri/target/release/bundle/nsis/）
+pnpm tauri:build        # 生产包：Whalito_0.2.0_x64-setup.exe（DSH 端口 3080，数据目录 ~/.dsh）
+pnpm tauri:build:test   # 测试包：Whalito-Test_0.2.0_x64-setup.exe（DSH 端口 30080，数据目录 ~/.dsh-test）
+```
+
+测试包与生产包三隔离（包名/标识符、默认端口、DSH 数据目录均不同），可同时安装、同时运行、互不干扰。测试开关是编译期的 `WHALITO_TEST_BUILD=1`（见 `src-tauri/src/state.rs` 的 `TEST_BUILD`），生产构建不设置该变量，测试代码被编译器折叠、零残留。
+
+```
+安装器输出目录：src-tauri/target/release/bundle/nsis/
 ```
 
 > 安装包当前未签名，Windows SmartScreen 会提示「未知发布者」，属预期；正式分发建议配置代码签名证书。

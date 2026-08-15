@@ -240,19 +240,26 @@ fn install_dsh_inner(app: &AppHandle, shared: &Shared, spec: &str) -> Result<Env
 #[tauri::command]
 pub async fn install_dsh(app: AppHandle, st: State<'_, AppState>) -> Result<EnvInfo, String> {
     let shared = Shared::from_state(&st);
-    tauri::async_runtime::spawn_blocking(move || install_dsh_inner(&app, &shared, "@deepseek-ai/dsh"))
+    let app_for_sync = app.clone();
+    let env = tauri::async_runtime::spawn_blocking(move || install_dsh_inner(&app, &shared, "@deepseek-ai/dsh"))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+    // 安装/更新会清空应用目录，重同步鲸仔设置分区插件。
+    let _ = crate::settings_plugin::ensure_settings_plugin(&app_for_sync);
+    Ok(env)
 }
 
 #[tauri::command]
 pub async fn update_dsh(app: AppHandle, st: State<'_, AppState>) -> Result<EnvInfo, String> {
     let shared = Shared::from_state(&st);
-    tauri::async_runtime::spawn_blocking(move || {
+    let app_for_sync = app.clone();
+    let env = tauri::async_runtime::spawn_blocking(move || {
         install_dsh_inner(&app, &shared, "@deepseek-ai/dsh@latest")
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    let _ = crate::settings_plugin::ensure_settings_plugin(&app_for_sync);
+    Ok(env)
 }
 
 fn verify_dsh_inner(node_dir: Option<String>) -> Result<String, String> {
@@ -332,10 +339,15 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
         .ok_or("未检测到 Node.js，请先安装。".to_string())?;
     let bin = state::resolve_dsh_bin(&env).ok_or("找不到 dsh 入口文件，请重新安装 Harness。".to_string())?;
 
+    // 启动前强制同步鲸仔设置分区插件（幂等），保证 Loader 能解析插件条目。
+    crate::settings_plugin::ensure_settings_plugin(app)?;
+
     shared.stop.store(false, Ordering::SeqCst);
     *shared.url.lock().unwrap() = None;
 
     let mut cmd = std::process::Command::new(&node);
+    // DSH 家目录与插件同步保持一致（测试构建使用隔离的 ~/.dsh-test）。
+    cmd.env("DSH_HOME", crate::settings_plugin::dsh_home());
     cmd.arg(bin.to_string_lossy().to_string())
         .arg("web")
         .arg("--port")

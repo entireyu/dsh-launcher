@@ -49,7 +49,7 @@
 
 ## 🚀 快速开始
 
-1. 在 [Releases](https://github.com/entireyu/dsh-whalito-desk/releases) 下载最新安装包 `Whalito_0.2.0_x64-setup.exe`
+1. 在 [Releases](https://github.com/entireyu/dsh-whalito-desk/releases) 下载最新安装包 `Whalito_0.3.0_x64-setup.exe`
 2. 双击安装（首次运行 Windows SmartScreen 会提示「未知发布者」，点击「仍要运行」即可）
 3. 打开鲸仔，其余交给它 —— 检测、补齐、启动全程自动
 4. 关闭窗口即最小化到托盘，需要时点击托盘图标唤回
@@ -96,8 +96,8 @@ pnpm tauri dev        # 前端 dev server + Rust debug
 ### 打包
 
 ```bash
-pnpm tauri:build        # 生产包：Whalito_0.2.0_x64-setup.exe（DSH 端口 3080，数据目录 ~/.dsh）
-pnpm tauri:build:test   # 测试包：Whalito-Test_0.2.0_x64-setup.exe（DSH 端口 30080，数据目录 ~/.dsh-test）
+pnpm tauri:build        # 生产包：Whalito_0.3.0_x64-setup.exe（DSH 端口 3080，数据目录 ~/.dsh）
+pnpm tauri:build:test   # 测试包：Whalito-Test_0.3.0_x64-setup.exe（DSH 端口 30080，数据目录 ~/.dsh-test）
 ```
 
 测试包与生产包三隔离（包名/标识符、默认端口、DSH 数据目录均不同），可同时安装、同时运行、互不干扰。测试开关是编译期的 `WHALITO_TEST_BUILD=1`（见 `src-tauri/src/state.rs` 的 `TEST_BUILD`），生产构建不设置该变量，测试代码被编译器折叠、零残留。

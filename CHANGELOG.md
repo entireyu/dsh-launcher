@@ -4,7 +4,7 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.3.0] - 2026-08-16
 
 ### 新增
 - DSH 设置面板内新增「鲸仔」分区：端口 / npm 镜像 / 开机自启 / 自动重启 / 工作目录 / Node 目录 / 桌宠开关，以及服务器启停 / 重启 / 返回鲸仔助手；与主窗口通过 postMessage 双向同步
@@ -69,6 +69,7 @@
 - 安装 / 启动等阻塞命令改为异步，修复点击安装后界面卡死
 - 探测端口上外部已运行的 DSH 服务器，修复误报已停止
 
+[0.3.0]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/entireyu/dsh-whalito-desk/releases/tag/v0.1.0

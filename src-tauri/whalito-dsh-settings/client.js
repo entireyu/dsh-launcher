@@ -266,14 +266,14 @@
           }, busy ? '检查中…' : '检查更新');
         }
 
-        function resultText(info, isWhalito) {
+        function resultText(info, isWhalito, isTestBuild) {
           if (!info || !info.latest) return null;
           if (!info.updateAvailable) {
             return h('span', { key: 'result', style: styles.hint }, '已是最新（' + info.latest + '）');
           }
           return h('span', { key: 'result', style: { fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } }, [
             h('span', { key: 'result-text' }, '发现新版本 ' + info.latest),
-            isWhalito
+            isWhalito && info.autoUpdate
               ? h('button', {
                   key: 'apply-update',
                   type: 'button',
@@ -298,7 +298,12 @@
                   onClick: function () { sendAction('open-url', { url: info.url }); },
                 }, '打开下载页')
               : null,
-            isWhalito ? null : h('span', { key: 'result-hint', style: styles.hint }, '（更新请到鲸仔面板执行）'),
+            isWhalito
+              ? (info.autoUpdate
+                  ? null
+                  : h('span', { key: 'no-auto-hint', style: styles.hint },
+                      isTestBuild ? '（测试版不提供自动更新）' : '（该版本没有自动更新安装包）'))
+              : h('span', { key: 'result-hint', style: styles.hint }, '（更新请到鲸仔面板执行）'),
           ]);
         }
 
@@ -315,14 +320,14 @@
               h('span', { key: 'dsh-label', style: { fontWeight: 600 } }, 'DSH：'),
               h('span', { key: 'dsh-current' }, vd && vd.current ? vd.current : '未安装'),
               checkButton('dsh'),
-              resultText(vd, false),
+              resultText(vd, false, false),
             ]),
             h('div', { key: 'row-whalito', style: styles.statusRow }, [
               h('span', { key: 'whalito-label', style: { fontWeight: 600 } }, '鲸仔：'),
               h('span', { key: 'whalito-current' },
                 (vw && vw.current ? vw.current : '未知') + (vw && vw.testBuild ? '（测试版）' : '')),
               checkButton('whalito'),
-              resultText(vw, true),
+              resultText(vw, true, !!(vw && vw.testBuild)),
               h('button', {
                 key: 'github',
                 type: 'button',

@@ -25,12 +25,13 @@ export interface DshVersionInfo {
   updateAvailable: boolean;
 }
 
-/** 鲸仔版本行（附测试标记与下载页地址）。 */
+/** 鲸仔版本行（附测试标记、下载页地址与自动更新可用性）。 */
 export interface WhalitoVersionInfo {
   current: string | null;
   testBuild: boolean;
   latest: string | null;
   updateAvailable: boolean;
+  autoUpdate: boolean;
   url: string | null;
 }
 

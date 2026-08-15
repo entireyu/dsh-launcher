@@ -23,6 +23,8 @@ pub struct WhalitoVersionInfo {
     pub test_build: bool,
     pub latest: Option<String>,
     pub update_available: bool,
+    /// 该版本是否有适用于当前变体的安装包资产（测试版不上传 GitHub，通常为 false）。
+    pub auto_update: bool,
     pub url: Option<String>,
 }
 
@@ -60,6 +62,7 @@ pub fn whalito_version_info() -> WhalitoVersionInfo {
         test_build: TEST_BUILD,
         latest: None,
         update_available: false,
+        auto_update: false,
         url: None,
     }
 }
@@ -70,11 +73,14 @@ pub fn whalito_check_update() -> Result<WhalitoVersionInfo, String> {
     let info = fetch_release_info()?;
     let current = current_version();
     let update_available = is_update_available(&current, &info.version);
+    // 测试版安装包不上传 GitHub：无匹配资产时 auto_update=false，前端隐藏「立即更新」。
+    let auto_update = update_available && pick_asset(&info.assets).is_some();
     Ok(WhalitoVersionInfo {
         current,
         test_build: TEST_BUILD,
         latest: Some(info.version),
         update_available,
+        auto_update,
         url: info.url,
     })
 }

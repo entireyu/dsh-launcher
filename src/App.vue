@@ -309,7 +309,14 @@ function buildVersions(): VersionsSnapshot {
     },
     whalito: whalitoVer.value
       ? toPlain(whalitoVer.value)
-      : { current: null, testBuild: false, latest: null, updateAvailable: false, url: null },
+      : {
+          current: null,
+          testBuild: false,
+          latest: null,
+          updateAvailable: false,
+          autoUpdate: false,
+          url: null,
+        },
   };
 }
 

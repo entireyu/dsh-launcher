@@ -68,7 +68,14 @@ const hello = {
   status: { phase: "running", url: "http://127.0.0.1:3080", pid: 1234 },
   versions: {
     dsh: { current: "0.2.1", latest: null, updateAvailable: false },
-    whalito: { current: "0.2.0", testBuild: true, latest: null, updateAvailable: false, url: null },
+    whalito: {
+      current: "0.2.0",
+      testBuild: true,
+      latest: null,
+      updateAvailable: false,
+      autoUpdate: false,
+      url: null,
+    },
   },
 };
 act(() => {
@@ -137,6 +144,7 @@ act(() => {
             testBuild: true,
             latest: "0.2.5",
             updateAvailable: true,
+            autoUpdate: true,
             url: "https://github.com/entireyu/dsh-whalito-desk/releases/tag/v0.2.5",
           },
         },
@@ -186,6 +194,37 @@ act(() => {
 });
 assert.ok(text().includes("正在下载更新…"), "应显示更新进度文案");
 console.log("ok: 立即更新流程");
+
+// 测试版无匹配资产（autoUpdate=false）：不显示立即更新，显示提示文案
+act(() => {
+  listeners.forEach((fn) =>
+    fn({
+      data: {
+        channel: "whalito",
+        type: "hello",
+        settings: hello.settings,
+        status: hello.status,
+        versions: {
+          dsh: { current: "0.2.1", latest: "0.3.0", updateAvailable: true },
+          whalito: {
+            current: "0.2.0",
+            testBuild: true,
+            latest: "0.3.0",
+            updateAvailable: true,
+            autoUpdate: false,
+            url: "https://github.com/entireyu/dsh-whalito-desk/releases/tag/v0.3.0",
+          },
+        },
+      },
+      source: fakeParent,
+    }),
+  );
+});
+const t4 = text();
+assert.ok(!t4.includes("立即更新"), "无匹配资产不应显示立即更新");
+assert.ok(t4.includes("测试版不提供自动更新"), "应显示测试版提示");
+assert.ok(t4.includes("打开下载页"), "打开下载页仍可用");
+console.log("ok: 测试版无自动更新提示");
 
 // GitHub 按钮：点击 → 发送 open-url 指向项目主页
 const githubBtn = renderer.root.findAll(

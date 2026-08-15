@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { PhysicalPosition } from "@tauri-apps/api/dpi";
 
 interface TodoItem {
   content: string;
@@ -30,6 +32,7 @@ interface PetState {
   sessions: PetSession[];
   runningCount: number;
   subagentCount: number;
+  error: string | null;
 }
 
 interface PetAlert {
@@ -43,9 +46,30 @@ interface PetAlert {
   questions?: unknown;
 }
 
+/** 桌宠样式契约（~/.dsh/pet-style.json，可经 DSH 或命令调整）。 */
+interface PetStyle {
+  schemaVersion: number;
+  size: number;
+  position: { x: number; y: number } | null;
+  avatar: string | null;
+  accent: string;
+  bubble: { bg: string; fg: string; sub: string; fontSize: number };
+  animations: { bob: boolean; float: boolean; attention: boolean };
+}
+
 const state = ref<PetState | null>(null);
 const alerts = ref<PetAlert[]>([]);
 const menuOpen = ref(false);
+const menuPos = ref({ x: 0, y: 0 });
+const style = ref<PetStyle | null>(null);
+const dragState = ref<{
+  x: number;
+  y: number;
+  winX: number;
+  winY: number;
+  scale: number;
+} | null>(null);
+const dragMoved = ref(false);
 
 const runningSessions = computed(() =>
   (state.value?.sessions ?? []).filter((s) => s.running && !s.blank && !s.isSubagent),
@@ -74,7 +98,9 @@ const firstApproval = computed(() => approvals.value[0] ?? null);
 const alertCount = computed(() => alerts.value.length);
 
 const phaseLabel = computed(() => {
-  if (!state.value || state.value.phase === "stopped") return "服务器未运行";
+  if (!state.value) return "正在连接…";
+  if (state.value.phase === "error") return state.value.error ?? "无法连接服务器";
+  if (state.value.phase === "stopped") return "服务器未运行";
   if (state.value.runningCount === 0) return "空闲中";
   return null;
 });
@@ -103,6 +129,104 @@ const bubbleSub = computed(() => {
   if (goalPhase.value) parts.push(goalPhase.value);
   return parts.join(" · ");
 });
+
+// 样式契约驱动的外观（全部可被 pet-style.json 覆盖）。
+const whaleStyle = computed(() => {
+  const size = style.value?.size ?? 96;
+  return { width: `${size}px`, height: `${size}px` };
+});
+const avatarSrc = computed(() => style.value?.avatar || "/logo.png");
+const accentStyle = computed(() => ({ background: style.value?.accent ?? "#f87171" }));
+const bubbleStyle = computed(() =>
+  style.value
+    ? {
+        background: style.value.bubble.bg,
+        borderColor: style.value.bubble.bg,
+        color: style.value.bubble.fg,
+        fontSize: `${style.value.bubble.fontSize}px`,
+      }
+    : {},
+);
+const subStyle = computed(() => ({ color: style.value?.bubble.sub ?? "#9aa3b2" }));
+const anim = computed(() => style.value?.animations ?? { bob: true, float: true, attention: true });
+
+function onAvatarError() {
+  // 头像加载失败 → 本地回退内置 logo（不写回契约文件）。
+  if (style.value?.avatar) {
+    style.value = { ...style.value, avatar: null };
+  }
+}
+
+// 拖拽：手动移动窗口（透明窗口下 startDragging/data-tauri-drag-region
+// 在 Windows 均不可靠）。以按下点为锚、按缩放系数换算物理坐标，
+// 4px 阈值内算点击；onMoved 事件照常触发位置持久化。
+async function onWhaleMouseDown(e: MouseEvent) {
+  if (e.button !== 0) return;
+  const win = getCurrentWindow();
+  const [pos, scale] = await Promise.all([win.outerPosition(), win.scaleFactor()]);
+  dragState.value = {
+    x: e.screenX,
+    y: e.screenY,
+    winX: pos.x,
+    winY: pos.y,
+    scale,
+  };
+  dragMoved.value = false;
+  window.removeEventListener("mousemove", onWhaleMouseMove);
+  window.removeEventListener("mouseup", onWhaleMouseUp);
+  window.addEventListener("mousemove", onWhaleMouseMove);
+  window.addEventListener("mouseup", onWhaleMouseUp);
+}
+
+// 拖拽节流：mousemove 只更新"期望位置"，每帧最多执行一次 setPosition
+// （requestAnimationFrame 合并），避免逐事件 await IPC 造成的队列积压滞后。
+let pendingTarget: { x: number; y: number } | null = null;
+let dragRafId: number | null = null;
+
+function applyPendingPosition() {
+  dragRafId = null;
+  const t = pendingTarget;
+  if (!t) return;
+  pendingTarget = null;
+  getCurrentWindow()
+    .setPosition(new PhysicalPosition(t.x, t.y))
+    .catch(() => {});
+}
+
+async function onWhaleMouseMove(e: MouseEvent) {
+  const d = dragState.value;
+  if (!d) return;
+  const dx = (e.screenX - d.x) * d.scale;
+  const dy = (e.screenY - d.y) * d.scale;
+  if (!dragMoved.value && Math.abs(dx) <= 4 * d.scale && Math.abs(dy) <= 4 * d.scale) {
+    return;
+  }
+  dragMoved.value = true;
+  pendingTarget = { x: d.winX + dx, y: d.winY + dy };
+  if (dragRafId === null) {
+    dragRafId = requestAnimationFrame(applyPendingPosition);
+  }
+}
+
+function onWhaleMouseUp() {
+  dragState.value = null;
+  window.removeEventListener("mousemove", onWhaleMouseMove);
+  window.removeEventListener("mouseup", onWhaleMouseUp);
+  // 松手时把最后一次目标位置落盘（取消未执行的帧，直接应用）。
+  if (dragRafId !== null) {
+    cancelAnimationFrame(dragRafId);
+    dragRafId = null;
+  }
+  applyPendingPosition();
+}
+
+function onWhaleClick() {
+  if (dragMoved.value) {
+    dragMoved.value = false;
+    return;
+  }
+  open(primary.value?.sessionId ?? null);
+}
 
 const unlisteners: UnlistenFn[] = [];
 
@@ -140,53 +264,142 @@ async function hidePet() {
   await invoke("pet_set_enabled", { enabled: false });
 }
 
+// 右键菜单：与托盘菜单同款动作。启动/停止/在浏览器打开沿用托盘事件通道，
+// 由主窗口统一处理；打开面板/退出走新增命令。
+function onContextMenu(e: MouseEvent) {
+  const W = 200;
+  const H = 250;
+  const MENU_W = 150;
+  const MENU_H = 210;
+  menuPos.value = {
+    x: Math.min(Math.max(0, e.clientX), W - MENU_W),
+    y: Math.min(Math.max(0, e.clientY), H - MENU_H),
+  };
+  menuOpen.value = true;
+}
+
+function trayAction(action: string) {
+  menuOpen.value = false;
+  emit("tray-action", action).catch(() => {});
+}
+
+async function showMainWindow() {
+  menuOpen.value = false;
+  await invoke("show_main_window");
+}
+
+async function quitApp() {
+  menuOpen.value = false;
+  await invoke("quit_app");
+}
+
 onMounted(async () => {
+  invoke("bridge_diag", { line: "pet 页 onMounted 开始" }).catch(() => {});
+  let firstStateLogged = false;
   unlisteners.push(
     await listen<PetState>("pet-state", (e) => {
       state.value = e.payload;
+      if (!firstStateLogged) {
+        firstStateLogged = true;
+        invoke("bridge_diag", { line: `pet 页收到状态事件：${e.payload.phase}` }).catch(() => {});
+      }
     }),
     await listen<PetAlert>("pet-alert", (e) => upsertAlert(e.payload)),
     await listen<string>("pet-alert-clear", (e) => clearAlert(e.payload)),
+    await listen<PetStyle>("pet-style", (e) => {
+      style.value = e.payload;
+    }),
   );
+  invoke("bridge_diag", { line: "pet 页监听器注册完成" }).catch(() => {});
   try {
     state.value = await invoke<PetState | null>("pet_status");
-  } catch {
-    /* 忽略 */
+    style.value = await invoke<PetStyle>("pet_get_style");
+    invoke("bridge_diag", {
+      line: `pet_status 返回：${state.value ? state.value.phase : "null"}`,
+    }).catch(() => {});
+  } catch (e) {
+    invoke("bridge_diag", { line: `pet_status invoke 失败：${String(e)}` }).catch(() => {});
   }
+  // 兜底轮询：事件丢失 / 快照为空时，每 3s 主动拉取一次。
+  const fallbackTimer = window.setInterval(async () => {
+    if (!state.value) {
+      try {
+        state.value = await invoke<PetState | null>("pet_status");
+      } catch {
+        /* 忽略 */
+      }
+    }
+  }, 3000);
+  unlisteners.push(() => window.clearInterval(fallbackTimer));
+  invoke("bridge_diag", { line: "pet 页 onMounted 完成" }).catch(() => {});
+  // 拖拽结束位置持久化（防抖 500ms 写回 pet-style.json）。
+  let moveTimer: number | undefined;
+  unlisteners.push(
+    await getCurrentWindow().onMoved(({ payload }) => {
+      if (moveTimer) window.clearTimeout(moveTimer);
+      moveTimer = window.setTimeout(() => {
+        invoke("pet_set_position", { x: payload.x, y: payload.y }).catch(() => {});
+      }, 500);
+    }),
+  );
 });
 
 onUnmounted(() => {
   unlisteners.forEach((u) => u());
 });
+
+// 页面级错误兜底上报（诊断用）。
+window.addEventListener("error", (e) => {
+  invoke("bridge_diag", { line: `pet 页 JS 错误：${e.message}` }).catch(() => {});
+});
+window.addEventListener("unhandledrejection", (e) => {
+  invoke("bridge_diag", { line: `pet 页未处理 Promise：${String(e.reason)}` }).catch(() => {});
+});
 </script>
 
 <template>
-  <div class="pet" @contextmenu.prevent="menuOpen = true">
+  <div class="pet" @contextmenu.prevent="onContextMenu" @click="menuOpen = false">
     <!-- 提示气泡 -->
-    <div v-if="bubbleTitle" class="bubble" @click="open(primary?.sessionId ?? null)">
+    <div
+      v-if="bubbleTitle"
+      class="bubble"
+      :class="{ float: anim.float }"
+      :style="bubbleStyle"
+      @click="open(primary?.sessionId ?? null)"
+    >
       <div class="bubble-title">{{ bubbleTitle }}</div>
-      <div v-if="bubbleSub" class="bubble-sub">{{ bubbleSub }}</div>
+      <div v-if="bubbleSub" class="bubble-sub" :style="subStyle">{{ bubbleSub }}</div>
       <div v-if="approvals.length > 0" class="bubble-actions" @click.stop>
         <button class="allow" @click="respond(firstApproval, 'allowed-once')">允许</button>
         <button class="reject" @click="respond(firstApproval, 'rejected')">拒绝</button>
       </div>
     </div>
 
-    <!-- 鲸仔本体（可拖拽） -->
+    <!-- 鲸仔本体（按住拖拽 / 轻点打开主界面） -->
     <div
       class="whale"
-      :class="{ attention: alertCount > 0 }"
-      data-tauri-drag-region
-      @click="open(primary?.sessionId ?? null)"
+      :class="{ bob: anim.bob, attention: alertCount > 0 && anim.attention }"
+      :style="whaleStyle"
+      @mousedown="onWhaleMouseDown"
+      @click="onWhaleClick"
     >
-      <img src="/logo.png" alt="鲸仔" draggable="false" />
-      <span v-if="alertCount > 0" class="badge">{{ alertCount }}</span>
+      <img :src="avatarSrc" alt="鲸仔" draggable="false" @error="onAvatarError" />
+      <span v-if="alertCount > 0" class="badge" :style="accentStyle">{{ alertCount }}</span>
     </div>
 
-    <!-- 右键菜单 -->
-    <div v-if="menuOpen" class="menu" @click.stop>
-      <button @click="open(null)">打开面板</button>
+    <!-- 右键菜单（与托盘同款：打开面板/启动/停止/浏览器打开/隐藏桌宠/退出） -->
+    <div
+      v-if="menuOpen"
+      class="menu"
+      :style="{ left: menuPos.x + 'px', top: menuPos.y + 'px' }"
+      @click.stop
+    >
+      <button @click="showMainWindow">打开面板</button>
+      <button @click="trayAction('start')">启动服务器</button>
+      <button @click="trayAction('stop')">停止服务器</button>
+      <button @click="trayAction('open')">在浏览器打开</button>
       <button @click="hidePet">隐藏桌宠</button>
+      <button @click="quitApp">退出</button>
     </div>
   </div>
 </template>
@@ -218,6 +431,9 @@ onUnmounted(() => {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   cursor: pointer;
   text-align: left;
+}
+
+.bubble.float {
   animation: float 3s ease-in-out infinite;
 }
 
@@ -233,7 +449,7 @@ onUnmounted(() => {
 }
 
 .bubble-title {
-  font-size: 12px;
+  font-size: inherit;
   font-weight: 600;
   line-height: 1.35;
   word-break: break-all;
@@ -281,9 +497,10 @@ onUnmounted(() => {
 
 .whale {
   position: relative;
-  width: 96px;
-  height: 96px;
   cursor: pointer;
+}
+
+.whale.bob {
   animation: bob 2.6s ease-in-out infinite;
 }
 
@@ -319,8 +536,7 @@ onUnmounted(() => {
 
 .menu {
   position: absolute;
-  bottom: 116px;
-  right: 8px;
+  z-index: 10;
   display: flex;
   flex-direction: column;
   gap: 2px;

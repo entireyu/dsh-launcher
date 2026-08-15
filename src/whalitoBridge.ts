@@ -18,6 +18,27 @@ export interface WhalitoStatus {
   pid: number | null;
 }
 
+/** DSH 版本行（当前/最新/是否有更新）。 */
+export interface DshVersionInfo {
+  current: string | null;
+  latest: string | null;
+  updateAvailable: boolean;
+}
+
+/** 鲸仔版本行（附测试标记与下载页地址）。 */
+export interface WhalitoVersionInfo {
+  current: string | null;
+  testBuild: boolean;
+  latest: string | null;
+  updateAvailable: boolean;
+  url: string | null;
+}
+
+export interface VersionsSnapshot {
+  dsh: DshVersionInfo;
+  whalito: WhalitoVersionInfo;
+}
+
 export interface WhalitoMessage {
   channel: "whalito";
   type: string;
@@ -26,6 +47,9 @@ export interface WhalitoMessage {
   settings?: WhalitoSettings | null;
   status?: WhalitoStatus;
   message?: string;
+  versions?: VersionsSnapshot;
+  target?: string;
+  url?: unknown;
 }
 
 /** 当前 DSH 服务源（用于校验 iframe 消息的 event.origin）。 */

@@ -62,7 +62,7 @@
 | 一键安装 Node.js | 支持 winget、nvm、自定义目录便携版 |
 | 安装 / 更新 Harness | 支持切换 npm 镜像源，国内更快 |
 | 服务器管理 | 一键启动 / 停止 / 重启，异常自动拉起 |
-| 鲸仔设置分区 | DSH 设置面板内直接管理鲸仔设置（端口 / 镜像 / 自启 / 桌宠等），取代悬浮按钮 |
+| 鲸仔设置分区 | DSH 设置面板内直接管理鲸仔设置（端口 / 镜像 / 自启 / 桌宠 / 版本检查与一键更新等），取代悬浮按钮 |
 | 托盘常驻 | 最小化到托盘，支持开机自启 |
 | 实时日志 | 运行状态与输出实时可见 |
 
@@ -107,6 +107,35 @@ pnpm tauri:build:test   # 测试包：Whalito-Test_0.2.0_x64-setup.exe（DSH 端
 ```
 
 > 安装包当前未签名，Windows SmartScreen 会提示「未知发布者」，属预期；正式分发建议配置代码签名证书。
+
+### 桌宠样式 API（pet-style.json）
+
+桌宠外观由样式契约文件驱动，文件变更 2 秒内热更新（无需重启）：
+
+| 版本 | 契约文件路径 |
+| --- | --- |
+| 生产 | `~/.dsh/pet-style.json` |
+| 测试 | `~/.dsh-test/pet-style.json` |
+
+```json
+{
+  "schemaVersion": 1,
+  "size": 96,
+  "position": { "x": 1280, "y": 720 },
+  "avatar": null,
+  "accent": "#f87171",
+  "bubble": { "bg": "#171a21", "fg": "#e8eaf0", "sub": "#9aa3b2", "fontSize": 12 },
+  "animations": { "bob": true, "float": true, "attention": true }
+}
+```
+
+- `size`：鲸仔直径（px，48–160）；`position`：窗口物理坐标（null = 默认右下角，拖拽后自动写回）；
+- `avatar`：头像图片路径或 data URI（null = 内置 logo，超 256KB 忽略）；
+- `accent`：徽标强调色；`bubble`：气泡背景/前景/副文本色与字号（10–18）；`animations`：三项动画开关；
+- 所有字段均可省略（缺省走内置默认值），非法值自动回退默认；
+- **通过 DSH 调整**：直接对 DSH 说"把桌宠改小一点/换成红色气泡/换个头像"，让它编辑该 JSON 即可；也可经「鲸仔设置」未来的样式界面调整。
+
+桌宠窗口可按住鲸仔拖拽（轻点打开主界面），位置自动持久化；桌宠状态异常时可查看 `%TEMP%\whalito-pet.log` 诊断日志。
 
 ## 🔍 原理：背后的真实命令
 

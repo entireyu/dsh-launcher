@@ -3,7 +3,12 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { dshOrigin, isWhalitoMessage, postToDsh, toPlain } from "./whalitoBridge";
-import type { WhalitoMessage, WhalitoSettings } from "./whalitoBridge";
+import type {
+  VersionsSnapshot,
+  WhalitoMessage,
+  WhalitoSettings,
+  WhalitoVersionInfo,
+} from "./whalitoBridge";
 
 interface EnvInfo {
   found: boolean;
@@ -61,6 +66,7 @@ const installStage = ref<string>("");
 
 const embedNonce = ref(0);
 const embedFrame = ref<HTMLIFrameElement | null>(null);
+const whalitoVer = ref<WhalitoVersionInfo | null>(null);
 let whalitoPingLogged = false;
 
 const stageText: Record<string, string> = {
@@ -289,6 +295,24 @@ function onEmbedLoad() {
   pushSnapshot();
 }
 
+/** 组装版本快照：DSH 来自环境检测 + 最近一次检查结果；鲸仔来自 Rust 命令缓存。 */
+function buildVersions(): VersionsSnapshot {
+  const dshCurrent = env.value?.dshVersion ?? null;
+  return {
+    dsh: {
+      current: dshCurrent,
+      latest: latestVersion.value,
+      updateAvailable:
+        latestVersion.value !== null &&
+        dshCurrent !== null &&
+        latestVersion.value !== dshCurrent,
+    },
+    whalito: whalitoVer.value
+      ? toPlain(whalitoVer.value)
+      : { current: null, testBuild: false, latest: null, updateAvailable: false, url: null },
+  };
+}
+
 function pushSnapshot() {
   // 注意：必须 toPlain 去响应式——Vue reactive Proxy 过不了 postMessage
   // 的 structured clone（会抛 DataCloneError）；settings 未加载时也回握手。
@@ -297,6 +321,7 @@ function pushSnapshot() {
     type: "hello",
     settings: settings.value ? toPlain(settings.value) : null,
     status: toPlain(server.value),
+    versions: toPlain(buildVersions()),
   });
   if (err !== null) {
     invoke("bridge_diag", { line: `推送快照失败：${err}` }).catch(() => {});
@@ -387,6 +412,39 @@ async function handleWhalitoMessage(event: MessageEvent) {
       goPanel();
       return;
     }
+    if (action === "check-update") {
+      const target = msg.target;
+      if (target === "dsh") {
+        await checkLatest();
+        if (latestVersion.value === null) {
+          postWhalitoError("无法获取 DSH 最新版本（检查失败或已是最新）");
+        }
+      } else if (target === "whalito") {
+        const r = await invoke<WhalitoVersionInfo>("whalito_check_update").catch((e) => {
+          postWhalitoError(typeof e === "string" ? e : String(e));
+          return null;
+        });
+        whalitoVer.value = r ?? whalitoVer.value;
+      }
+      pushSnapshot();
+      return;
+    }
+    if (action === "open-url") {
+      const url = msg.url;
+      if (typeof url === "string" && url.startsWith("https://")) {
+        await invoke("open_url", { url }).catch((e) => postWhalitoError(String(e)));
+      } else {
+        postWhalitoError("无效的下载地址");
+      }
+      return;
+    }
+    if (action === "apply-update") {
+      // 命令末尾会退出应用（安装链接管重启），不 await；失败时回传错误。
+      invoke("whalito_apply_update").catch((e) =>
+        postWhalitoError(typeof e === "string" ? e : String(e)),
+      );
+      return;
+    }
     postWhalitoError(`未知动作：${action ?? ""}`);
   } catch (e) {
     postWhalitoError(typeof e === "string" ? e : String(e));
@@ -403,6 +461,9 @@ function clearLogs() {
 
 async function loadSettings() {
   settings.value = await invoke<Settings>("get_settings");
+  whalitoVer.value = await invoke<WhalitoVersionInfo>("whalito_version_info").catch(
+    () => null,
+  );
 }
 
 async function saveSettings() {
@@ -547,16 +608,24 @@ onMounted(async () => {
       }
     }),
   );
-  // 桌宠请求唤起对应会话：切到内嵌视图并重载 iframe，
-  // 让待处理的审批 / 提问随前端重连自动浮出。
+  // 桌宠请求唤起主界面：只切换视图并聚焦，不重载 iframe
+  // （审批 / 提问经 SSE 实时到达，前端连接保持存活）。
   unlisteners.push(
     await listen<string | null>("pet-open-session", () => {
       if (server.value.url) {
         view.value = "embed";
-        embedNonce.value += 1;
       } else {
         view.value = "panel";
       }
+    }),
+  );
+  unlisteners.push(
+    await listen<string>("whalito-update", (e) => {
+      postToDsh(embedFrame.value, {
+        channel: "whalito",
+        type: "update-progress",
+        message: e.payload,
+      });
     }),
   );
   window.addEventListener("message", handleWhalitoMessage);

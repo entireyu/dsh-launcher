@@ -49,6 +49,7 @@ pub struct PetSessionInfo {
 }
 
 /// 桌宠状态快照（每 2s 推送一次）。
+/// phase: running / stopped（服务器未运行）/ error（API 不可达，见 error 字段）。
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PetState {
@@ -56,6 +57,7 @@ pub struct PetState {
     pub sessions: Vec<PetSessionInfo>,
     pub running_count: usize,
     pub subagent_count: usize,
+    pub error: Option<String>,
 }
 
 impl PetState {
@@ -65,14 +67,50 @@ impl PetState {
             sessions: Vec::new(),
             running_count: 0,
             subagent_count: 0,
+            error: None,
+        }
+    }
+
+    fn failed(reason: String) -> Self {
+        Self {
+            phase: "error".to_string(),
+            sessions: Vec::new(),
+            running_count: 0,
+            subagent_count: 0,
+            error: Some(reason),
         }
     }
 }
 
-/// 解析出当前服务器 URL（含外部已运行实例探测）。无服务器时返回 None。
+/// 解析当前服务器 URL：健康优先的兜底链——
+/// 记录中的 server_url（健康）→ 配置端口探测（健康，覆盖外部实例/端口变更/
+/// url 未提取成功的情况）→ None。
 fn current_base(st: &AppState) -> Option<String> {
     let port = st.settings.lock().unwrap().port;
-    state::status_from(&st.pid, &st.server_url, port).url
+    let recorded = st.server_url.lock().unwrap().clone();
+    if let Some(url) = recorded.as_deref() {
+        if state::health(url) {
+            return Some(url.to_string());
+        }
+    }
+    let probe = format!("http://127.0.0.1:{port}");
+    if state::health(&probe) {
+        return Some(probe);
+    }
+    None
+}
+
+/// 桌宠诊断日志：写 %TEMP%\whalito-pet.log（排障直接读文件）。
+fn pet_log(line: &str) {
+    use std::io::Write;
+    let path = std::env::temp_dir().join("whalito-pet.log");
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "[{secs}] {line}");
+    }
 }
 
 /// 把 http(s) 基地址转成 ws(s) 基地址。
@@ -149,6 +187,7 @@ fn poll_state(base: &str) -> Result<PetState, String> {
         sessions,
         running_count,
         subagent_count,
+        error: None,
     })
 }
 
@@ -274,6 +313,8 @@ fn orchestrator(app: AppHandle) {
     let mut mux_stop: Option<Arc<AtomicBool>> = None;
     let mut host_stop: Option<Arc<AtomicBool>> = None;
     let mut last_url: Option<String> = None;
+    let mut last_phase: Option<String> = None;
+    let mut last_style_text: Option<String> = None;
 
     loop {
         let st = app.state::<AppState>();
@@ -282,6 +323,15 @@ fn orchestrator(app: AppHandle) {
         }
         let base = current_base(&st);
         drop(st);
+
+        // 桌宠样式契约热更新：文件内容变化 → 广播并应用位置。
+        let style_text = std::fs::read_to_string(crate::pet_style::style_path()).ok();
+        if style_text != last_style_text {
+            last_style_text = style_text;
+            let style = crate::pet_style::load();
+            crate::pet_style::apply_position(&app, style.position.as_ref());
+            crate::pet_style::broadcast_style(&app, &style);
+        }
 
         match base {
             Some(u) => {
@@ -301,8 +351,20 @@ fn orchestrator(app: AppHandle) {
                     last_url = Some(u.clone());
                 }
                 match poll_state(&u) {
-                    Ok(state) => emit_state(&app, state),
-                    Err(_) => {}
+                    Ok(state) => {
+                        if last_phase.as_deref() != Some("running") {
+                            pet_log(&format!("poll ok, base={u}"));
+                            last_phase = Some("running".into());
+                        }
+                        emit_state(&app, state);
+                    }
+                    Err(e) => {
+                        if last_phase.as_deref() != Some("error") {
+                            pet_log(&format!("poll failed, base={u}, reason={e}"));
+                            last_phase = Some("error".into());
+                        }
+                        emit_state(&app, PetState::failed(e));
+                    }
                 }
             }
             None => {
@@ -313,6 +375,10 @@ fn orchestrator(app: AppHandle) {
                     s.store(true, Ordering::SeqCst);
                 }
                 last_url = None;
+                if last_phase.as_deref() != Some("stopped") {
+                    pet_log("no reachable server (recorded url and configured port both unhealthy)");
+                    last_phase = Some("stopped".into());
+                }
                 emit_state(&app, PetState::stopped());
             }
         }
@@ -426,4 +492,18 @@ pub fn pet_respond(
 #[tauri::command]
 pub fn pet_set_enabled(app: AppHandle, enabled: bool) -> Result<bool, String> {
     set_enabled(&app, enabled)
+}
+
+/// 桌宠右键菜单：显示并聚焦主窗口（与托盘"打开面板"一致）。
+#[tauri::command]
+pub fn show_main_window(app: AppHandle) {
+    crate::show_main(&app);
+}
+
+/// 桌宠右键菜单：退出应用（与托盘"退出"一致；DSH 子进程保留运行）。
+#[tauri::command]
+pub fn quit_app(app: AppHandle) {
+    app.state::<AppState>().quitting.store(true, Ordering::SeqCst);
+    app.state::<AppState>().pet_stop.store(true, Ordering::SeqCst);
+    app.exit(0);
 }

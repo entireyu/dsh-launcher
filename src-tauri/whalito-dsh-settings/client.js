@@ -156,6 +156,9 @@
         var dirty = React.useState(false);
         var draft = React.useState(null);
         var tries = React.useState(0);
+        var versions = React.useState(null);
+        var checking = React.useState('');
+        var updateStage = React.useState('');
 
         React.useEffect(function () {
           var done = false;
@@ -171,14 +174,22 @@
                 if (!dirty[0]) draft[1](cloneSettings(data.settings));
               }
               if (data.status) status[1](data.status);
+              if (data.versions) versions[1](data.versions);
               connected[1](true);
+              checking[1]('');
               done = true;
             } else if (data.type === 'status') {
               if (data.status) status[1](data.status);
               connected[1](true);
               done = true;
+            } else if (data.type === 'versions') {
+              if (data.versions) versions[1](data.versions);
+              checking[1]('');
+            } else if (data.type === 'update-progress') {
+              updateStage[1](typeof data.message === 'string' ? data.message : '');
             } else if (data.type === 'error') {
               notice[1](typeof data.message === 'string' ? data.message : '鲸仔操作失败');
+              checking[1]('');
             }
           }
           window.addEventListener('message', onMessage);
@@ -239,6 +250,93 @@
           }
           notice[1]('');
           sendAction('save-settings', { value: value });
+        }
+
+        function checkButton(target) {
+          var busy = checking[0] === target;
+          return h('button', {
+            key: target + '-check',
+            type: 'button',
+            style: presetStyle,
+            disabled: busy,
+            onClick: function () {
+              checking[1](target);
+              sendAction('check-update', { target: target });
+            },
+          }, busy ? '检查中…' : '检查更新');
+        }
+
+        function resultText(info, isWhalito) {
+          if (!info || !info.latest) return null;
+          if (!info.updateAvailable) {
+            return h('span', { key: 'result', style: styles.hint }, '已是最新（' + info.latest + '）');
+          }
+          return h('span', { key: 'result', style: { fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } }, [
+            h('span', { key: 'result-text' }, '发现新版本 ' + info.latest),
+            isWhalito
+              ? h('button', {
+                  key: 'apply-update',
+                  type: 'button',
+                  style: presetActiveStyle,
+                  onClick: function () {
+                    if (
+                      typeof window.confirm === 'function' &&
+                      !window.confirm('将下载并安装鲸仔新版本（' + info.latest + '），应用会自动重启。继续？')
+                    ) {
+                      return;
+                    }
+                    updateStage[1]('正在准备更新…');
+                    sendAction('apply-update');
+                  },
+                }, '立即更新')
+              : null,
+            isWhalito && info.url
+              ? h('button', {
+                  key: 'open-download',
+                  type: 'button',
+                  style: presetStyle,
+                  onClick: function () { sendAction('open-url', { url: info.url }); },
+                }, '打开下载页')
+              : null,
+            isWhalito ? null : h('span', { key: 'result-hint', style: styles.hint }, '（更新请到鲸仔面板执行）'),
+          ]);
+        }
+
+        function versionBlock() {
+          var v = versions[0];
+          var vd = v && v.dsh ? v.dsh : null;
+          var vw = v && v.whalito ? v.whalito : null;
+          return h('div', {
+            key: 'versions',
+            style: { display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid rgba(127,127,127,.25)', paddingTop: '12px' },
+          }, [
+            h('div', { key: 'versions-title', style: { fontWeight: 600, fontSize: '13px' } }, '版本信息'),
+            h('div', { key: 'row-dsh', style: styles.statusRow }, [
+              h('span', { key: 'dsh-label', style: { fontWeight: 600 } }, 'DSH：'),
+              h('span', { key: 'dsh-current' }, vd && vd.current ? vd.current : '未安装'),
+              checkButton('dsh'),
+              resultText(vd, false),
+            ]),
+            h('div', { key: 'row-whalito', style: styles.statusRow }, [
+              h('span', { key: 'whalito-label', style: { fontWeight: 600 } }, '鲸仔：'),
+              h('span', { key: 'whalito-current' },
+                (vw && vw.current ? vw.current : '未知') + (vw && vw.testBuild ? '（测试版）' : '')),
+              checkButton('whalito'),
+              resultText(vw, true),
+              h('button', {
+                key: 'github',
+                type: 'button',
+                style: presetStyle,
+                onClick: function () {
+                  sendAction('open-url', { url: 'https://github.com/entireyu/dsh-whalito-desk' });
+                },
+              }, 'GitHub'),
+            ]),
+            updateStage[0]
+              ? h('div', { key: 'update-stage', style: styles.statusRow },
+                  h('span', { key: 'update-stage-text', style: styles.hint }, updateStage[0]))
+              : null,
+          ]);
         }
 
         if (!connected[0]) {
@@ -364,6 +462,7 @@
           ]),
           h('div', { key: 'save-row', style: styles.row },
             h('button', { key: 'save', style: styles.primary, onClick: save }, '保存设置')),
+          versionBlock(),
           notice[0] ? h('div', { key: 'notice', style: styles.error }, notice[0]) : null,
           h('div', { key: 'hint', style: styles.hint }, '端口变更会在保存后自动重启服务器生效。'),
         ]);

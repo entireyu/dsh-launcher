@@ -66,6 +66,10 @@ const hello = {
     autoRestart: true, workspaceDir: null, nodeDir: null, petEnabled: true,
   },
   status: { phase: "running", url: "http://127.0.0.1:3080", pid: 1234 },
+  versions: {
+    dsh: { current: "0.2.1", latest: null, updateAvailable: false },
+    whalito: { current: "0.2.0", testBuild: true, latest: null, updateAvailable: false, url: null },
+  },
 };
 act(() => {
   listeners.forEach((fn) => fn({ data: hello, source: fakeParent }));
@@ -79,7 +83,11 @@ assert.ok(!t2.includes("启动服务器"), "运行中不应显示启动按钮");
 assert.ok(t2.includes("停止服务器"), "运行中应显示停止按钮");
 assert.ok(t2.includes("显示桌宠"), "应渲染桌宠开关");
 assert.ok(t2.includes("npmmirror（国内加速）"), "应渲染镜像源快捷切换");
-console.log("ok: 握手后表单完整渲染");
+assert.ok(t2.includes("版本信息"), "应渲染版本信息区块");
+assert.ok(t2.includes("DSH：") && t2.includes("0.2.1"), "应显示 DSH 版本");
+assert.ok(t2.includes("鲸仔：") && t2.includes("0.2.0（测试版）"), "应显示鲸仔版本与测试标记");
+assert.ok(t2.includes("检查更新"), "应渲染检查更新按钮");
+console.log("ok: 握手后表单完整渲染（含版本信息）");
 assert.ok(sent.some((m) => m.type === "ping"), "挂载时应发送 ping");
 console.log("ok: 挂载发送 ping");
 
@@ -95,6 +103,102 @@ const presetMsg = sent.find((m) => m.action === "save-settings");
 assert.ok(presetMsg, "快捷切换应立即发送保存");
 assert.equal(presetMsg.value.registry, "https://registry.npmmirror.com");
 console.log("ok: npmmirror 快捷切换立即保存");
+
+// 版本检查更新流程：点击 → 发送 check-update → 父窗口回传最新版本
+// 点击后按钮文案变为"检查中…"，先缓存两个按钮的实例引用再逐个点击。
+const checkBtnList = renderer.root.findAll(
+  (n) => n.type === "button" && n.props.children === "检查更新",
+);
+assert.equal(checkBtnList.length, 2, "应有两个检查更新按钮");
+const dshCheckBtn = checkBtnList[0];
+const whalitoCheckBtn = checkBtnList[1];
+act(() => dshCheckBtn.props.onClick());
+assert.ok(
+  sent.some((m) => m.action === "check-update" && m.target === "dsh"),
+  "应发送 DSH 检查请求",
+);
+act(() => whalitoCheckBtn.props.onClick());
+assert.ok(
+  sent.some((m) => m.action === "check-update" && m.target === "whalito"),
+  "应发送鲸仔检查请求",
+);
+act(() => {
+  listeners.forEach((fn) =>
+    fn({
+      data: {
+        channel: "whalito",
+        type: "hello",
+        settings: hello.settings,
+        status: hello.status,
+        versions: {
+          dsh: { current: "0.2.1", latest: "0.3.0", updateAvailable: true },
+          whalito: {
+            current: "0.2.0",
+            testBuild: true,
+            latest: "0.2.5",
+            updateAvailable: true,
+            url: "https://github.com/entireyu/dsh-whalito-desk/releases/tag/v0.2.5",
+          },
+        },
+      },
+      source: fakeParent,
+    }),
+  );
+});
+const t3 = text();
+assert.ok(t3.includes("发现新版本 0.3.0"), "DSH 应显示发现新版本");
+assert.ok(t3.includes("更新请到鲸仔面板执行"), "DSH 应显示更新提示");
+assert.ok(t3.includes("发现新版本 0.2.5"), "鲸仔应显示发现新版本");
+const openBtn = renderer.root.findAll(
+  (n) => n.type === "button" && n.props.children === "打开下载页",
+)[0];
+act(() => openBtn.props.onClick());
+assert.ok(
+  sent.some(
+    (m) =>
+      m.action === "open-url" &&
+      m.url === "https://github.com/entireyu/dsh-whalito-desk/releases/tag/v0.2.5",
+  ),
+  "应发送打开下载页动作",
+);
+console.log("ok: 检查更新流程（DSH/鲸仔/打开下载页）");
+
+// 立即更新：点击 → 发送 apply-update → 父窗口回传进度 → 显示进度文案
+const applyBtn = renderer.root.findAll(
+  (n) => n.type === "button" && n.props.children === "立即更新",
+)[0];
+act(() => applyBtn.props.onClick());
+assert.ok(
+  sent.some((m) => m.action === "apply-update"),
+  "应发送立即更新动作",
+);
+act(() => {
+  listeners.forEach((fn) =>
+    fn({
+      data: {
+        channel: "whalito",
+        type: "update-progress",
+        message: "正在下载更新…",
+      },
+      source: fakeParent,
+    }),
+  );
+});
+assert.ok(text().includes("正在下载更新…"), "应显示更新进度文案");
+console.log("ok: 立即更新流程");
+
+// GitHub 按钮：点击 → 发送 open-url 指向项目主页
+const githubBtn = renderer.root.findAll(
+  (n) => n.type === "button" && n.props.children === "GitHub",
+)[0];
+act(() => githubBtn.props.onClick());
+assert.ok(
+  sent.some(
+    (m) => m.action === "open-url" && m.url === "https://github.com/entireyu/dsh-whalito-desk",
+  ),
+  "GitHub 按钮应发送项目主页地址",
+);
+console.log("ok: GitHub 按钮");
 
 // 编辑端口 + 保存
 const rootNode = renderer.root;

@@ -1,7 +1,9 @@
 mod commands;
 mod pet;
+mod pet_style;
 mod settings_plugin;
 mod state;
+mod update;
 
 use std::sync::atomic::Ordering;
 
@@ -129,10 +131,17 @@ pub fn run() {
             commands::get_logs,
             settings_plugin::sync_settings_plugin,
             settings_plugin::bridge_diag,
+            pet::show_main_window,
+            pet::quit_app,
+            update::whalito_version_info,
+            update::whalito_check_update,
             pet::pet_status,
             pet::pet_open_session,
             pet::pet_respond,
             pet::pet_set_enabled,
+            pet_style::pet_get_style,
+            pet_style::pet_set_style,
+            pet_style::pet_set_position,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -172,8 +181,10 @@ pub fn run() {
                 .shadow(false)
                 .build()?;
 
-            // 定位到主屏右下角。
-            if let Ok(Some(monitor)) = pet_window.primary_monitor() {
+            // 定位：优先样式契约中的自定义位置，否则默认主屏右下角。
+            if let Some(pos) = crate::pet_style::load().position {
+                let _ = pet_window.set_position(tauri::PhysicalPosition::new(pos.x, pos.y));
+            } else if let Ok(Some(monitor)) = pet_window.primary_monitor() {
                 let size = monitor.size();
                 let scale = monitor.scale_factor();
                 let margin = (16.0 * scale).round() as i32;

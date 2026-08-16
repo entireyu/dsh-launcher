@@ -414,6 +414,9 @@ fn install_dsh_inner(app: &AppHandle, shared: &Shared, spec: &str) -> Result<Env
         spec.to_string(),
         "--no-audit".to_string(),
         "--no-fund".to_string(),
+        // macOS：让 npm 把 node 所在目录加入生命周期脚本的 PATH
+        // （koffi 等原生依赖的安装脚本执行 `node ./cnoke.cjs` 需要找到 node）
+        "--scripts-prepend-node-path=true".to_string(),
     ];
     if !registry.is_empty() {
         args.push("--registry".to_string());

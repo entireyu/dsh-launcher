@@ -154,6 +154,10 @@ pub fn run_output(program: &str, args: &[&str]) -> Result<String, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // macOS：GUI 进程 PATH 极简，子进程（npm 生命周期脚本、git 等）找不到工具
+    if let Some(p) = child_path() {
+        cmd.env("PATH", p);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -186,6 +190,9 @@ pub fn run_streaming(app: &AppHandle, program: &str, args: &[&str]) -> Result<St
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(p) = child_path() {
+        cmd.env("PATH", p);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -705,6 +712,13 @@ pub fn refresh_tray(app: &AppHandle, running: bool) {
 
 /// 检测环境。`node_dir` 为用户自定义的 Node 目录（优先于 PATH / 系统安装）。
 pub fn detect_env(node_dir: Option<&str>) -> EnvInfo {
+    // 预热：首次检测时捕获一次用户 shell PATH（macOS 约 0.3–0.5s，之后走缓存）。
+    // 之后 npm 安装（koffi 等生命周期脚本需要 node）与 dsh 子进程才能找到工具。
+    #[cfg(target_os = "macos")]
+    {
+        let _ = shell_path();
+    }
+
     let version_on_path = run_output("node", &["--version"]).ok();
 
     let candidates = node_candidates(node_dir);
@@ -887,6 +901,31 @@ pub fn effective_path() -> Option<String> {
             parts.push(p);
         }
         if let Some(s) = shell_path() {
+            parts.push(s);
+        }
+        Some(parts.join(":"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// 所有子进程共用的 PATH：macOS 合并 GUI 进程 PATH 与「已捕获」的用户 shell PATH
+/// （未捕获时仅返回当前 PATH——捕获流程自身也会走 run_output，必须避免递归）。
+/// 供 run_output / run_streaming 统一注入；其他平台返回 None。
+pub fn child_path() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let cached = SHELL_PATH
+            .get()
+            .and_then(|slot| slot.lock().ok())
+            .and_then(|g| g.clone());
+        let mut parts: Vec<String> = Vec::new();
+        if let Ok(p) = std::env::var("PATH") {
+            parts.push(p);
+        }
+        if let Some(s) = cached {
             parts.push(s);
         }
         Some(parts.join(":"))

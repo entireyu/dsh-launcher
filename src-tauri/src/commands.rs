@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +44,13 @@ pub async fn detect_env(st: State<'_, AppState>) -> Result<EnvInfo, String> {
         .map_err(|e| e.to_string())
 }
 
+/// 当前平台标识（"windows" / "macos" / "linux"），供前端切换安装 UI。
+#[tauri::command]
+pub fn get_platform() -> &'static str {
+    std::env::consts::OS
+}
+
+#[cfg(windows)]
 fn winget_node(app: &AppHandle, shared: &Shared, upgrade: bool) -> Result<EnvInfo, String> {
     let label = if upgrade { "升级" } else { "安装" };
     state::push_log(
@@ -86,19 +93,119 @@ fn winget_node(app: &AppHandle, shared: &Shared, upgrade: bool) -> Result<EnvInf
 #[tauri::command]
 pub async fn install_node(app: AppHandle, st: State<'_, AppState>) -> Result<EnvInfo, String> {
     let shared = Shared::from_state(&st);
-    tauri::async_runtime::spawn_blocking(move || winget_node(&app, &shared, false))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(windows)]
+        {
+            winget_node(&app, &shared, false)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            install_node_tarball(&app, &shared, false)
+        }
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        {
+            Err("Linux 暂不支持一键安装 Node.js，请用系统包管理器安装 Node.js ≥ 22.19。".to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 pub async fn upgrade_node(app: AppHandle, st: State<'_, AppState>) -> Result<EnvInfo, String> {
     let shared = Shared::from_state(&st);
-    tauri::async_runtime::spawn_blocking(move || winget_node(&app, &shared, true))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(windows)]
+        {
+            winget_node(&app, &shared, true)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            install_node_tarball(&app, &shared, true)
+        }
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        {
+            Err("Linux 暂不支持一键升级 Node.js".to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
+/// macOS 一键安装 / 升级 Node.js：下载官方 darwin 架构 tar.gz，
+/// 解压到 ~/Library/Application Support 下鲸仔专属目录（免管理员），
+/// 并把绝对路径回写 node_dir（GUI 应用无 shell PATH，不能依赖 PATH 定位）。
+#[cfg(target_os = "macos")]
+fn install_node_tarball(
+    app: &AppHandle,
+    shared: &Shared,
+    upgrade: bool,
+) -> Result<EnvInfo, String> {
+    let label = if upgrade { "升级" } else { "安装" };
+    let version = state::latest_node_lts_major22().unwrap_or_else(|| "22.19.0".to_string());
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        other => return Err(format!("不支持的处理器架构：{other}")),
+    };
+    let registry = shared.registry();
+    let base = state::node_dist_base(&registry);
+    let file = format!("node-v{version}-darwin-{arch}.tar.gz");
+    let url = format!("{base}/v{version}/{file}");
+    let tarball = std::env::temp_dir().join(&file);
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let dest_dir = Path::new(&home)
+        .join("Library")
+        .join("Application Support")
+        .join("com.deepseek.dsh-launcher")
+        .join("node")
+        .join(&version);
+    let node_dir = dest_dir.join("bin");
+
+    let _ = app.emit("install-stage", "download");
+    state::push_log(
+        &shared.logs,
+        &format!("[系统] 正在下载 Node.js {version}（{url}）"),
+    );
+    state::download_file(&url, &tarball)?;
+
+    let _ = app.emit("install-stage", "extract");
+    state::push_log(
+        &shared.logs,
+        &format!("[系统] 下载完成，正在解压到 {}", dest_dir.display()),
+    );
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).map_err(|e| format!("创建目录失败：{e}"))?;
+    let status = std::process::Command::new("/usr/bin/tar")
+        .args([
+            "-xzf",
+            tarball.to_str().unwrap_or(""),
+            "--strip-components=1",
+            "-C",
+            dest_dir.to_str().unwrap_or(""),
+        ])
+        .status()
+        .map_err(|e| format!("解压失败：{e}"))?;
+    let _ = std::fs::remove_file(&tarball);
+    if !status.success() {
+        return Err("Node.js 压缩包解压失败".to_string());
+    }
+
+    // 回写 node_dir 并持久化（重启后仍可定位）
+    let node_dir_str = node_dir.to_string_lossy().to_string();
+    {
+        let mut s = shared.settings.lock().unwrap();
+        s.node_dir = Some(node_dir_str.clone());
+    }
+    let s = shared.settings.lock().unwrap().clone();
+    state::save_settings(app, &s)?;
+
+    state::push_log(&shared.logs, &format!("[系统] Node.js {label}完成，正在重新检测"));
+    Ok(state::detect_env(Some(&node_dir_str)))
+}
+
+#[cfg(windows)]
 fn install_node_nvm_inner(app: &AppHandle, shared: &Shared) -> Result<EnvInfo, String> {
     let nvm = state::detect_nvm().ok_or("未检测到 nvm，无法使用 nvm 安装 Node.js。")?;
     let version = state::latest_node_lts_major22().unwrap_or_else(|| "22.19.0".to_string());
@@ -122,9 +229,59 @@ fn install_node_nvm_inner(app: &AppHandle, shared: &Shared) -> Result<EnvInfo, S
 #[tauri::command]
 pub async fn install_node_nvm(app: AppHandle, st: State<'_, AppState>) -> Result<EnvInfo, String> {
     let shared = Shared::from_state(&st);
-    tauri::async_runtime::spawn_blocking(move || install_node_nvm_inner(&app, &shared))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(windows)]
+        {
+            install_node_nvm_inner(&app, &shared)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            install_node_nvm_macos(&app, &shared)
+        }
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        {
+            Err("当前平台不支持 nvm 安装".to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// macOS：nvm 是 shell 函数，必须 source nvm.sh 后在同一 shell 里执行。
+/// 安装并设为默认后，用 `nvm which 22` 解析出 node 绝对路径回写 node_dir
+/// （stdout 最后一行即路径）。
+#[cfg(target_os = "macos")]
+fn install_node_nvm_macos(app: &AppHandle, shared: &Shared) -> Result<EnvInfo, String> {
+    let nvm_sh = state::detect_nvm()
+        .ok_or("未检测到 nvm（~/.nvm/nvm.sh），无法使用 nvm 安装 Node.js。")?;
+    let script = format!(
+        "source \"{nvm_sh}\" && nvm install 22 && nvm alias default 22 && nvm use 22 && printf '%s' \"$(nvm which 22)\""
+    );
+    state::push_log(
+        &shared.logs,
+        &format!("[系统] 检测到 nvm，开始安装 Node.js 22（{nvm_sh}）"),
+    );
+    let _ = app.emit("install-stage", "install");
+    let out = state::run_output("zsh", &["-lc", &script])
+        .or_else(|_| state::run_output("bash", &["-lc", &script]))?;
+    let node_bin = out
+        .lines()
+        .next_back()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or("nvm 安装完成，但未能解析 Node 路径")?;
+    let node_dir = Path::new(&node_bin)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .ok_or("nvm 安装完成，但未能解析 Node 目录")?;
+    {
+        let mut s = shared.settings.lock().unwrap();
+        s.node_dir = Some(node_dir.clone());
+    }
+    let s = shared.settings.lock().unwrap().clone();
+    state::save_settings(app, &s)?;
+    state::push_log(&shared.logs, "[系统] nvm 安装并切换完成，正在重新检测");
+    Ok(state::detect_env(Some(&node_dir)))
 }
 
 fn install_node_portable_inner(
@@ -139,30 +296,69 @@ fn install_node_portable_inner(
     let version = state::latest_node_lts_major22().unwrap_or_else(|| "22.19.0".to_string());
     let registry = shared.registry();
     let base = state::node_dist_base(&registry);
-    let url = format!("{base}/v{version}/node-v{version}-win-x64.zip");
-    let zip_path = std::env::temp_dir().join(format!("node-v{version}-win-x64.zip"));
+
+    // 平台差异：包文件名与解压后 node 所在目录（Windows 保留原有 zip 行为）
+    #[cfg(windows)]
+    let (file, node_dir) = {
+        let f = format!("node-v{version}-win-x64.zip");
+        (f, PathBuf::from(&dir))
+    };
+    #[cfg(target_os = "macos")]
+    let (file, node_dir) = {
+        let arch = match std::env::consts::ARCH {
+            "aarch64" => "arm64",
+            "x86_64" => "x64",
+            other => return Err(format!("不支持的处理器架构：{other}")),
+        };
+        let f = format!("node-v{version}-darwin-{arch}.tar.gz");
+        (f, PathBuf::from(&dir).join("bin"))
+    };
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    return Err("当前平台不支持自定义目录安装 Node.js".to_string());
+
+    let url = format!("{base}/v{version}/{file}");
+    let dl_path = std::env::temp_dir().join(&file);
 
     let _ = app.emit("install-stage", "download");
     state::push_log(
         &shared.logs,
         &format!("[系统] 正在下载 Node.js {version}（{url}）"),
     );
-    state::download_file(&url, &zip_path)?;
+    state::download_file(&url, &dl_path)?;
 
     let _ = app.emit("install-stage", "extract");
     state::push_log(&shared.logs, &format!("[系统] 下载完成，正在解压到 {dir}"));
-    state::extract_zip(&zip_path, Path::new(&dir))?;
-    let _ = std::fs::remove_file(&zip_path);
+    #[cfg(windows)]
+    state::extract_zip(&dl_path, Path::new(&dir))?;
+    #[cfg(target_os = "macos")]
+    {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败：{e}"))?;
+        let status = std::process::Command::new("/usr/bin/tar")
+            .args([
+                "-xzf",
+                dl_path.to_str().unwrap_or(""),
+                "--strip-components=1",
+                "-C",
+                Path::new(&dir).to_str().unwrap_or(""),
+            ])
+            .status()
+            .map_err(|e| format!("解压失败：{e}"))?;
+        if !status.success() {
+            return Err("Node.js 压缩包解压失败".to_string());
+        }
+    }
+    let _ = std::fs::remove_file(&dl_path);
 
+    let node_dir_str = node_dir.to_string_lossy().to_string();
     {
         let mut s = shared.settings.lock().unwrap();
-        s.node_dir = Some(dir.clone());
+        s.node_dir = Some(node_dir_str.clone());
     }
     let s = shared.settings.lock().unwrap().clone();
     state::save_settings(app, &s)?;
 
     state::push_log(&shared.logs, "[系统] 便携版 Node.js 安装完成，正在重新检测");
-    Ok(state::detect_env(Some(&dir)))
+    Ok(state::detect_env(Some(&node_dir_str)))
 }
 
 #[tauri::command]
@@ -348,6 +544,11 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
     let mut cmd = std::process::Command::new(&node);
     // DSH 家目录与插件同步保持一致（测试构建使用隔离的 ~/.dsh-test）。
     cmd.env("DSH_HOME", crate::settings_plugin::dsh_home());
+    // macOS GUI 进程 PATH 极简：注入用户 shell 的 PATH，保证 dsh 的技能 /
+    // 子进程能找到 git 等常用工具；其他平台保持默认继承。
+    if let Some(p) = state::effective_path() {
+        cmd.env("PATH", p);
+    }
     cmd.arg(bin.to_string_lossy().to_string())
         .arg("web")
         .arg("--port")
@@ -591,7 +792,12 @@ pub fn open_url(url: String) -> Result<(), String> {
         .arg(&url)
         .spawn()
         .map_err(|e| e.to_string())?;
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open")
+        .arg(&url)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     std::process::Command::new("xdg-open")
         .arg(&url)
         .spawn()

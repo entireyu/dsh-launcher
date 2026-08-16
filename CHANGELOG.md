@@ -4,6 +4,21 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+- macOS 版本（universal，Apple Silicon / Intel 通用）：
+  - 环境检测适配 macOS：按优先级探测 自定义/便携目录 → nvm（`~/.nvm`，含 current 软链与版本目录）→ fnm/volta → Homebrew（`/opt/homebrew`、`/usr/local`）→ 系统 node → PATH；npm-cli.js 兼容 Homebrew / 官方 pkg / nvm 布局
+  - Node 一键安装：下载官方 `node-v22.x-darwin-{arm64,x64}.tar.gz` 解压到 `~/Library/Application Support/com.deepseek.dsh-launcher/node/`（免管理员）；支持 nvm 安装（`source nvm.sh`）与自定义目录便携安装；安装后回写 node_dir，GUI 应用无 shell PATH 也能定位
+  - macOS 启动 dsh 时注入用户 shell PATH；开机自启为用户级 LaunchAgent；停止服务器用 `kill`；按端口定位进程用 `lsof`；打开浏览器用 `open`
+  - 鲸仔自动更新支持 macOS：匹配 Release 中的 `.dmg` 资产，挂载 dmg 覆盖安装并自动重启（hdiutil / ditto / xattr 去隔离）
+  - 前端按平台切换安装 UI（winget 按钮仅 Windows 显示，macOS 显示 tar 包安装说明）
+- GitHub Actions Release 工作流（`.github/workflows/release.yml`）：推送 `v*` tag 自动构建 Windows NSIS 与 macOS universal dmg 并上传 GitHub Release
+- 修复 `whalito_apply_update` 命令未注册进 handler 的问题（此前鲸仔「立即更新」实际调用会失败）
+
+### 变更
+- 环境检测重构为「平台候选链 + 逐个版本探测择优」（Windows 候选与优先级不变，新增版本择优：同序候选中优先选用版本达标的）；`pick_asset` 参数化为 `pick_asset_for`（按平台选资产）
+
 ## [0.3.0] - 2026-08-16
 
 ### 新增
@@ -27,6 +42,7 @@
 - 桌宠修复与架构：服务器探测改为健康优先兜底链（记录地址 → 配置端口），API 失败显示具体原因并写 %TEMP%\whalito-pet.log 诊断日志；支持按住鲸仔拖拽窗口（4px 阈值区分点击）且位置持久化；点击桌宠不再重载内嵌页
 - 桌宠样式 API：新增 ~/.dsh/pet-style.json 契约（尺寸/位置/头像/强调色/气泡配色/动画开关），变更 2 秒内热更新，Pet.vue 退化为默认渲染器；用户可经 DSH 编辑该文件调整外观（详见 README）
 - 修复桌宠自上线以来一直显示「服务器未运行/正在连接」的根因：pet 窗口不在 Tauri capabilities 白名单，`plugin:event|listen` 被 ACL 拦截——已把 pet 加入白名单并授予 core:event:default 与窗口位置权限；拖拽改为手动移动窗口（缩放系数感知，4px 阈值区分点击），不再依赖透明窗口下不可靠的 startDragging
+- 测试版安装包不上传 GitHub：版本检查新增 autoUpdate 标记（release 有当前变体匹配资产才为 true），测试版发现新版本时隐藏「立即更新」并提示「测试版不提供自动更新」
 
 ## [0.2.0] - 2026-08-14
 

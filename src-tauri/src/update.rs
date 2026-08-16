@@ -1,7 +1,9 @@
 //! 鲸仔版本信息与更新：检查走 GitHub releases（404 回退 tags），
-//! 一键更新 = 下载对应变体的 NSIS 安装包 → 静默安装到当前目录 → 自动重启。
+//! 一键更新 = 下载对应平台变体的安装包（Windows NSIS / macOS dmg）→
+//! 静默安装到当前目录 → 自动重启。
 //! DSH 版本由现有 EnvInfo.dsh_version 与 check_latest_version（npm + 镜像源）提供。
 
+#[cfg(windows)]
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -46,6 +48,11 @@ pub fn current_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// 当前平台标识（"windows" / "macos" / "linux"），用于选择更新资产变体。
+pub fn platform_str() -> &'static str {
+    std::env::consts::OS
+}
+
 /// 版本比较：latest 严格大于 current 视为有更新；任一侧解析失败视为无更新。
 pub fn is_update_available(current: &str, latest: &str) -> bool {
     match (parse_semver(current), parse_semver(latest)) {
@@ -74,7 +81,7 @@ pub fn whalito_check_update() -> Result<WhalitoVersionInfo, String> {
     let current = current_version();
     let update_available = is_update_available(&current, &info.version);
     // 测试版安装包不上传 GitHub：无匹配资产时 auto_update=false，前端隐藏「立即更新」。
-    let auto_update = update_available && pick_asset(&info.assets).is_some();
+    let auto_update = update_available && pick_asset_for(&info.assets, platform_str(), TEST_BUILD).is_some();
     Ok(WhalitoVersionInfo {
         current,
         test_build: TEST_BUILD,
@@ -96,7 +103,7 @@ pub async fn whalito_apply_update(app: AppHandle) -> Result<(), String> {
     if !is_update_available(&current, &info.version) {
         return Err(format!("当前已是最新版本（{current}）"));
     }
-    let asset = pick_asset(&info.assets)
+    let asset = pick_asset_for(&info.assets, platform_str(), TEST_BUILD)
         .ok_or_else(|| format!("该版本没有适用于{}的安装包", if TEST_BUILD { "测试版" } else { "当前版本" }))?;
     emit(&app, "正在下载更新…");
     let dest = std::env::temp_dir().join(format!("whalito-update-{}", asset.name));
@@ -111,33 +118,38 @@ pub async fn whalito_apply_update(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 选择当前变体适用的安装包资产：
+/// 选择当前平台 + 变体适用的安装包资产：
+/// Windows 匹配 `_x64-setup.exe`，macOS 匹配 `.dmg`；
 /// 测试构建只接受名称含 "-Test_" 的资产，生产构建只接受不含 "-Test_" 的资产。
-fn pick_asset(assets: &[AssetInfo]) -> Option<AssetInfo> {
-    let setup: Vec<&AssetInfo> = assets
+fn pick_asset_for(assets: &[AssetInfo], platform: &str, test_build: bool) -> Option<AssetInfo> {
+    let matches: Vec<&AssetInfo> = assets
         .iter()
-        .filter(|a| a.name.ends_with("_x64-setup.exe"))
+        .filter(|a| match platform {
+            "windows" => a.name.ends_with("_x64-setup.exe"),
+            "macos" => a.name.ends_with(".dmg"),
+            _ => false,
+        })
         .collect();
-    if setup.is_empty() {
+    if matches.is_empty() {
         return None;
     }
-    let matched = setup
+    let matched = matches
         .iter()
-        .find(|a| a.name.contains("-Test_") == TEST_BUILD)
+        .find(|a| a.name.contains("-Test_") == test_build)
         .copied();
     match matched {
         Some(a) => Some(a.clone()),
         None => {
-            if TEST_BUILD {
+            if test_build {
                 None
             } else {
-                Some(setup[0].clone())
+                Some(matches[0].clone())
             }
         }
     }
 }
 
-/// 下载到目标文件并做基本校验（文件以 MZ 开头）。
+/// 下载到目标文件并做基本校验（Windows：MZ 魔数；macOS：非空且扩展名为 .dmg）。
 fn download_to(url: &str, dest: &Path) -> Result<(), String> {
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(300))
@@ -151,27 +163,42 @@ fn download_to(url: &str, dest: &Path) -> Result<(), String> {
     let mut file = std::fs::File::create(dest).map_err(|e| format!("创建临时文件失败：{e}"))?;
     std::io::copy(&mut reader, &mut file).map_err(|e| format!("写入临时文件失败：{e}"))?;
     drop(file);
-    let mut f = std::fs::File::open(dest).map_err(|e| format!("校验下载文件失败：{e}"))?;
-    let mut magic = [0u8; 2];
-    f.read_exact(&mut magic).map_err(|e| format!("读取下载文件失败：{e}"))?;
-    if &magic != b"MZ" {
-        let _ = std::fs::remove_file(dest);
-        return Err("下载的文件不是有效的 Windows 安装程序".into());
+    #[cfg(windows)]
+    {
+        let mut f = std::fs::File::open(dest).map_err(|e| format!("校验下载文件失败：{e}"))?;
+        let mut magic = [0u8; 2];
+        f.read_exact(&mut magic).map_err(|e| format!("读取下载文件失败：{e}"))?;
+        if &magic != b"MZ" {
+            let _ = std::fs::remove_file(dest);
+            return Err("下载的文件不是有效的 Windows 安装程序".into());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let meta = std::fs::metadata(dest).map_err(|e| format!("校验下载文件失败：{e}"))?;
+        let is_dmg = dest
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("dmg"));
+        if meta.len() == 0 || !is_dmg {
+            let _ = std::fs::remove_file(dest);
+            return Err("下载的文件不是有效的 macOS 安装包".into());
+        }
     }
     Ok(())
 }
 
-/// 启动更新链：等待旧进程退出 → 静默安装到当前目录 → 重启应用。
-/// 链由独立的 cmd 进程承载（DETACHED），应用退出后继续执行。
+/// 启动更新链：等待旧进程退出 → 安装新版本到当前目录 → 重启应用。
+/// Windows 链由独立 cmd 进程承载（DETACHED）；macOS 链由独立 /bin/sh 脚本承载。
 fn spawn_update_chain(dest: &Path) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("获取当前程序路径失败：{e}"))?;
     let dir = exe
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let chain = build_update_chain(dest, &dir, &exe);
     #[cfg(windows)]
     {
+        let chain = build_update_chain(dest, &dir, &exe);
         use std::os::windows::process::CommandExt;
         std::process::Command::new("cmd")
             .raw_arg("/C")
@@ -181,14 +208,60 @@ fn spawn_update_chain(dest: &Path) -> Result<(), String> {
             .map_err(|e| format!("启动更新进程失败：{e}"))?;
         Ok(())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        // .app 包名 = 可执行文件名（productName 与卷名同源，dmg 卷内同名 .app）。
+        let app_name = exe
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Whalito".to_string());
+        let script = build_update_script();
+        let script_path = std::env::temp_dir().join("whalito-update.sh");
+        std::fs::write(&script_path, &script).map_err(|e| format!("写入更新脚本失败：{e}"))?;
+        std::process::Command::new("/bin/sh")
+            .arg(&script_path)
+            .arg(dest)
+            .arg(&dir)
+            .arg(&exe)
+            .arg(&app_name)
+            .spawn()
+            .map_err(|e| format!("启动更新进程失败：{e}"))?;
+        Ok(())
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         Err("当前平台暂不支持自动更新".into())
     }
 }
 
+/// macOS 更新脚本模板（参数经位置变量传入，避免路径引号注入问题）：
+/// $1=dmg 路径，$2=当前 .app 所在目录，$3=应用可执行文件，$4=.app 包名。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn build_update_script() -> String {
+    [
+        "#!/bin/sh",
+        "set -u",
+        "DMG=\"$1\"; APPDIR=\"$2\"; APP=\"$3\"; APPNAME=\"$4\"",
+        // 等旧进程退出
+        "sleep 3",
+        // 移除下载隔离属性（未公证版本，避免 Gatekeeper 二次拦截）
+        "xattr -dr com.apple.quarantine \"$DMG\" 2>/dev/null",
+        // 挂载并解析卷挂载点
+        "MOUNT=$(hdiutil attach \"$DMG\" -nobrowse | awk '/\\/Volumes\\// {print $3}' | head -1)",
+        "[ -n \"$MOUNT\" ] || exit 1",
+        // 覆盖安装并重启
+        "rm -rf \"$APPDIR/$APPNAME.app\"",
+        "ditto \"$MOUNT/$APPNAME.app\" \"$APPDIR/$APPNAME.app\"",
+        "hdiutil detach \"$MOUNT\" -quiet",
+        "open \"$APP\"",
+        "",
+    ]
+    .join("\n")
+}
+
 /// 组装更新链命令行（独立纯函数，便于单测）：
 /// 延迟 5 秒等应用退出 → start /wait 静默安装（/D= 必须位于末尾）→ 重启应用。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn build_update_chain(installer: &Path, install_dir: &Path, app_exe: &Path) -> String {
     format!(
         "ping -n 6 127.0.0.1 >nul & start \"\" /wait \"{}\" /S /D={} & start \"\" \"{}\"",
@@ -337,15 +410,18 @@ mod tests {
                 url: "u2".into(),
             },
             AssetInfo {
-                name: "notes.txt".into(),
+                name: "Whalito_0.3.0_universal.dmg".into(),
                 url: "u3".into(),
             },
+            AssetInfo {
+                name: "notes.txt".into(),
+                url: "u4".into(),
+            },
         ];
-        // 测试构建会选 Test 资产；生产构建选非 Test。这里按 TEST_BUILD 是编译期
-        // 常量，两个方向无法在同一编译单元内切换——至少验证当前变体的规则与
-        // 非 setup 资产被过滤。
-        let picked = pick_asset(&assets).expect("should pick an asset");
+        // 测试构建会选 Test 资产；生产构建选非 Test。
+        let picked = pick_asset_for(&assets, "windows", TEST_BUILD).expect("should pick an asset");
         assert!(!picked.name.contains("notes.txt"));
+        assert!(!picked.name.ends_with(".dmg"));
         let setup_only = assets
             .iter()
             .filter(|a| a.name.ends_with("_x64-setup.exe"))
@@ -364,11 +440,45 @@ mod tests {
             name: "Whalito_0.3.0_x64-setup.exe".into(),
             url: "u1".into(),
         }];
-        let picked = pick_asset(&assets);
+        let picked = pick_asset_for(&assets, "windows", TEST_BUILD);
         if TEST_BUILD {
             assert!(picked.is_none());
         } else {
             assert!(picked.is_some());
         }
+    }
+
+    #[test]
+    fn picks_assets_by_platform() {
+        let assets = vec![
+            AssetInfo {
+                name: "Whalito_0.3.0_x64-setup.exe".into(),
+                url: "exe".into(),
+            },
+            AssetInfo {
+                name: "Whalito_0.3.0_universal.dmg".into(),
+                url: "dmg".into(),
+            },
+        ];
+        assert_eq!(
+            pick_asset_for(&assets, "windows", false).map(|a| a.name),
+            Some("Whalito_0.3.0_x64-setup.exe".to_string())
+        );
+        assert_eq!(
+            pick_asset_for(&assets, "macos", false).map(|a| a.name),
+            Some("Whalito_0.3.0_universal.dmg".to_string())
+        );
+        assert!(pick_asset_for(&assets, "linux", false).is_none());
+    }
+
+    #[test]
+    fn macos_update_script_is_complete() {
+        let s = build_update_script();
+        assert!(s.starts_with("#!/bin/sh"));
+        assert!(s.contains("xattr -dr com.apple.quarantine"));
+        assert!(s.contains("hdiutil attach \"$DMG\" -nobrowse"));
+        assert!(s.contains("ditto \"$MOUNT/$APPNAME.app\" \"$APPDIR/$APPNAME.app\""));
+        assert!(s.contains("hdiutil detach \"$MOUNT\" -quiet"));
+        assert!(s.contains("open \"$APP\""));
     }
 }

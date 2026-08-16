@@ -316,25 +316,227 @@ pub fn find_pid_on_port(port: u16) -> Option<u32> {
     None
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn find_pid_on_port(port: u16) -> Option<u32> {
+    let port_arg = format!("-iTCP:{port}");
+    let out = run_output("lsof", &["-nP", &port_arg, "-sTCP:LISTEN", "-t"]).ok()?;
+    out.lines().next()?.trim().parse::<u32>().ok()
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn find_pid_on_port(_port: u16) -> Option<u32> {
     None
 }
 
-fn fallback_node_path() -> Option<String> {
-    [
+/// 收集 node 候选路径（按平台与优先级排序，供 detect_env 逐个探测）。
+pub fn node_candidates(node_dir: Option<&str>) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        windows_node_candidates(node_dir)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_node_candidates(node_dir)
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        unix_node_candidates(node_dir)
+    }
+}
+
+/// Windows：用户目录 → where.exe → Program Files 兜底。
+#[cfg(windows)]
+fn windows_node_candidates(node_dir: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(dir) = node_dir {
+        let p = Path::new(dir).join("node.exe");
+        if p.exists() {
+            out.push(p.to_string_lossy().to_string());
+        }
+    }
+    if let Ok(o) = run_output("where.exe", &["node"]) {
+        if let Some(first) = o
+            .lines()
+            .next()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            out.push(first);
+        }
+    }
+    for p in [
         "C:\\Program Files\\nodejs\\node.exe",
         "C:\\Program Files (x86)\\nodejs\\node.exe",
-    ]
-    .iter()
-    .find(|p| Path::new(p).exists())
-    .map(|s| s.to_string())
+    ] {
+        if Path::new(p).exists() {
+            out.push(p.to_string());
+        }
+    }
+    out
+}
+
+/// macOS：GUI 应用从 Finder/Dock 启动时 PATH 极简（/usr/bin:/bin:/usr/sbin:/sbin），
+/// 因此必须靠绝对路径前缀链探测，PATH 只作最后兜底。
+#[cfg(target_os = "macos")]
+fn macos_node_candidates(node_dir: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    // 1. 用户自定义 / 便携 / 鲸仔 tar 包安装目录（安装后回写，重启后依然可靠）
+    if let Some(dir) = node_dir {
+        let p = Path::new(dir).join("node");
+        if p.exists() {
+            out.push(p.to_string_lossy().to_string());
+        }
+    }
+    // 2. nvm：current 软链优先，然后 versions 目录按版本降序
+    let nvm_base = std::env::var("NVM_DIR")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".nvm")));
+    if let Some(base) = nvm_base {
+        let cur = base.join("current").join("bin").join("node");
+        if cur.exists() {
+            out.push(cur.to_string_lossy().to_string());
+        }
+        let versions = base.join("versions").join("node");
+        if let Ok(rd) = std::fs::read_dir(&versions) {
+            let mut found: Vec<(String, (u64, u64, u64))> = rd
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    let ver = parse_semver(&name)?;
+                    Some((name, ver))
+                })
+                .collect();
+            found.sort_by(|a, b| b.1.cmp(&a.1));
+            for (name, _) in found {
+                let p = versions.join(&name).join("bin").join("node");
+                if p.exists() {
+                    out.push(p.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    // 3. fnm / volta（尽力检测）
+    if let Ok(home) = std::env::var("HOME") {
+        let h = PathBuf::from(&home);
+        for base in [
+            h.join(".local").join("share").join("fnm").join("node-versions"),
+            h.join("Library")
+                .join("Application Support")
+                .join("fnm")
+                .join("node-versions"),
+        ] {
+            if let Ok(rd) = std::fs::read_dir(&base) {
+                for e in rd.flatten() {
+                    let p = e.path().join("installation").join("bin").join("node");
+                    if p.exists() {
+                        out.push(p.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+        let volta = h.join(".volta").join("bin").join("node");
+        if volta.exists() {
+            out.push(volta.to_string_lossy().to_string());
+        }
+    }
+    // 4. Homebrew 前缀（Apple Silicon / Intel）
+    for p in ["/opt/homebrew/bin/node", "/usr/local/bin/node"] {
+        if Path::new(p).exists() {
+            out.push(p.to_string());
+        }
+    }
+    // 5. Xcode 命令行工具自带 node（通常过旧，由 pick_best_node 的版本判断降级）
+    if Path::new("/usr/bin/node").exists() {
+        out.push("/usr/bin/node".to_string());
+    }
+    // 6. PATH 兜底
+    if let Some(p) = find_in_path("node") {
+        out.push(p);
+    }
+    out
+}
+
+/// Linux：用户目录 → PATH。
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn unix_node_candidates(node_dir: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(dir) = node_dir {
+        let p = Path::new(dir).join("node");
+        if p.exists() {
+            out.push(p.to_string_lossy().to_string());
+        }
+    }
+    if let Some(p) = find_in_path("node") {
+        out.push(p);
+    }
+    out
+}
+
+/// 在 PATH 中查找可执行文件（校验可执行位；仅 unix 使用）。
+#[cfg(not(windows))]
+pub fn find_in_path(exe: &str) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(exe);
+        let executable = std::fs::metadata(&candidate)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false);
+        if executable {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+/// 从 (路径, 版本) 候选中选择最优节点：按传入顺序，取第一个版本满足最低要求的；
+/// 否则第一个能跑出任意版本的；再否则第一个候选。
+pub fn pick_best_node(cands: &[(String, Option<String>)]) -> Option<String> {
+    let mut any_version: Option<&str> = None;
+    let mut first: Option<&str> = None;
+    for (p, v) in cands {
+        if first.is_none() {
+            first = Some(p.as_str());
+        }
+        let Some(vs) = v else { continue };
+        if any_version.is_none() {
+            any_version = Some(p.as_str());
+        }
+        if parse_semver(vs).is_some_and(|t| t >= MIN_NODE_VERSION) {
+            return Some(p.clone());
+        }
+    }
+    any_version.or(first).map(|s| s.to_string())
 }
 
 pub fn npm_cli(node_path: &str) -> Option<PathBuf> {
     let dir = Path::new(node_path).parent()?;
-    let cli = dir.join("node_modules").join("npm").join("bin").join("npm-cli.js");
-    cli.exists().then_some(cli)
+    // 布局一：与 node 同级的 node_modules/npm（Windows 安装器 / 便携 zip）
+    let portable = dir.join("node_modules").join("npm").join("bin").join("npm-cli.js");
+    if portable.exists() {
+        return Some(portable);
+    }
+    // 布局二：符号链接解析后的真实路径附近——
+    // 同级 node_modules/npm（nvm-windows 的 versions/vX/node_modules）
+    // 或 ../lib/node_modules/npm（Homebrew Cellar / macOS 官方 pkg / nvm）
+    let real = std::fs::canonicalize(node_path).ok()?;
+    let real_dir = real.parent()?;
+    for candidate in [
+        real_dir.join("node_modules").join("npm").join("bin").join("npm-cli.js"),
+        real_dir
+            .join("..")
+            .join("lib")
+            .join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npm-cli.js"),
+    ] {
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 pub fn dsh_bin(npm_prefix: &str) -> Option<PathBuf> {
@@ -347,40 +549,82 @@ pub fn dsh_bin(npm_prefix: &str) -> Option<PathBuf> {
     bin.exists().then_some(bin)
 }
 
+/// 应用专用 npm 安装前缀（用户目录内，隔离且免管理员权限）。
 pub fn app_prefix_dir() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    Path::new(&base).join("dsh-launcher").join("npm")
+    #[cfg(windows)]
+    {
+        let base = std::env::var("LOCALAPPDATA")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+        Path::new(&base).join("dsh-launcher").join("npm")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        Path::new(&home)
+            .join("Library")
+            .join("Application Support")
+            .join("com.deepseek.dsh-launcher")
+            .join("npm")
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        Path::new(&home).join(".local").join("share").join("dsh-launcher").join("npm")
+    }
 }
 
 pub fn resolve_dsh_bin(env: &EnvInfo) -> Option<PathBuf> {
     env.dsh_bin.as_ref().map(PathBuf::from)
 }
 
-/// 探测 nvm-windows：PATH → NVM_HOME → %APPDATA%\nvm。返回 nvm 可执行文件路径。
+/// 探测 nvm：Windows 找 nvm-windows 可执行文件；macOS 找 nvm.sh
+/// （nvm 是 shell 函数，`which` 找不到，必须按目录探测）。
 pub fn detect_nvm() -> Option<String> {
-    if let Ok(out) = run_output("where.exe", &["nvm"]) {
-        if let Some(first) = out.lines().next() {
-            let s = first.trim();
-            if !s.is_empty() {
-                return Some(s.to_string());
+    #[cfg(windows)]
+    {
+        if let Ok(out) = run_output("where.exe", &["nvm"]) {
+            if let Some(first) = out.lines().next() {
+                let s = first.trim();
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
             }
         }
-    }
-    if let Ok(home) = std::env::var("NVM_HOME") {
-        let p = Path::new(&home).join("nvm.exe");
-        if p.exists() {
-            return Some(p.to_string_lossy().to_string());
+        if let Ok(home) = std::env::var("NVM_HOME") {
+            let p = Path::new(&home).join("nvm.exe");
+            if p.exists() {
+                return Some(p.to_string_lossy().to_string());
+            }
         }
-    }
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        let p = Path::new(&appdata).join("nvm").join("nvm.exe");
-        if p.exists() {
-            return Some(p.to_string_lossy().to_string());
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let p = Path::new(&appdata).join("nvm").join("nvm.exe");
+            if p.exists() {
+                return Some(p.to_string_lossy().to_string());
+            }
         }
+        None
     }
-    None
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(dir) = std::env::var("NVM_DIR") {
+            let p = Path::new(&dir).join("nvm.sh");
+            if p.exists() {
+                return Some(p.to_string_lossy().to_string());
+            }
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            let p = Path::new(&home).join(".nvm").join("nvm.sh");
+            if p.exists() {
+                return Some(p.to_string_lossy().to_string());
+            }
+        }
+        None
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        None
+    }
 }
 
 /// 从 nodejs.org 的 index.json 解析最新的 22.x 版本号（如 "22.19.0"）。失败返回 None。
@@ -459,32 +703,28 @@ pub fn refresh_tray(app: &AppHandle, running: bool) {
     }
 }
 
-/// 检测环境。`node_dir` 为用户自定义的 Node 目录（优先于 PATH / Program Files）。
+/// 检测环境。`node_dir` 为用户自定义的 Node 目录（优先于 PATH / 系统安装）。
 pub fn detect_env(node_dir: Option<&str>) -> EnvInfo {
     let version_on_path = run_output("node", &["--version"]).ok();
 
-    let node_path = node_dir
-        .map(|dir| {
-            let p = Path::new(dir).join("node.exe");
-            p.exists().then(|| p.to_string_lossy().to_string())
-        })
-        .flatten()
-        .or_else(|| {
-            run_output("where.exe", &["node"])
-                .ok()
-                .and_then(|o| o.lines().next().map(|s| s.trim().to_string()))
-                .filter(|s| !s.is_empty())
-        })
-        .or_else(fallback_node_path);
+    let candidates = node_candidates(node_dir);
+    let probed: Vec<(String, Option<String>)> = candidates
+        .iter()
+        .map(|p| (p.clone(), run_output(p, &["--version"]).ok()))
+        .collect();
+    let node_path = pick_best_node(&probed);
 
     let node = node_path.clone().unwrap_or_else(|| "node".to_string());
 
-    let version = if node_path.is_some() {
-        run_output(&node, &["--version"]).ok()
-    } else {
-        None
-    }
-    .or(version_on_path);
+    let version = node_path
+        .as_ref()
+        .and_then(|p| {
+            probed
+                .iter()
+                .find(|(c, _)| c == p)
+                .and_then(|(_, v)| v.clone())
+        })
+        .or(version_on_path);
 
     let npm_prefix = npm_cli(&node)
         .and_then(|cli| run_output(&node, &[cli.to_str().unwrap_or(""), "prefix", "-g"]).ok())
@@ -582,9 +822,79 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+/// macOS：写 / 删用户级 LaunchAgents plist（无需管理员权限）。
+#[cfg(target_os = "macos")]
+pub fn set_autostart(enabled: bool) -> Result<(), String> {
+    let home = std::env::var("HOME").map_err(|e| format!("无法确定用户目录：{e}"))?;
+    let agents = Path::new(&home).join("Library").join("LaunchAgents");
+    let plist = agents.join("com.deepseek.dsh-launcher.plist");
+    if enabled {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&agents)
+            .map_err(|e| format!("创建 LaunchAgents 目录失败：{e}"))?;
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Label</key>\n\t<string>com.deepseek.dsh-launcher</string>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>{}</string>\n\t\t<string>--autostart</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n</dict>\n</plist>\n",
+            exe.display()
+        );
+        std::fs::write(&plist, xml).map_err(|e| format!("写入自启配置失败：{e}"))
+    } else {
+        let _ = std::fs::remove_file(&plist);
+        Ok(())
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn set_autostart(_enabled: bool) -> Result<(), String> {
     Err("当前平台不支持开机自启".to_string())
+}
+
+/// macOS：缓存一次用户 shell 的完整 PATH。
+#[cfg(target_os = "macos")]
+static SHELL_PATH: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
+
+/// 捕获用户 shell 的 PATH（Finder 启动的 GUI 应用环境极简，需主动读取）。
+#[cfg(target_os = "macos")]
+fn capture_shell_path() -> Option<String> {
+    for shell in ["zsh", "bash"] {
+        if let Ok(out) = run_output(shell, &["-lc", "printf %s \"$PATH\""]) {
+            let s = out.trim().to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+/// 进程内只捕获一次（首次约 0.3–0.5s，之后即时返回）。
+#[cfg(target_os = "macos")]
+pub fn shell_path() -> Option<String> {
+    let slot = SHELL_PATH.get_or_init(|| Mutex::new(None));
+    let mut guard = slot.lock().ok()?;
+    if guard.is_none() {
+        *guard = capture_shell_path();
+    }
+    guard.clone()
+}
+
+/// 启动子进程时应注入的 PATH：macOS 合并 GUI 环境 PATH 与 shell PATH
+/// （dsh 的技能/子进程需要能找到 git 等工具）；其他平台返回 None（保持默认继承）。
+pub fn effective_path() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut parts: Vec<String> = Vec::new();
+        if let Ok(p) = std::env::var("PATH") {
+            parts.push(p);
+        }
+        if let Some(s) = shell_path() {
+            parts.push(s);
+        }
+        Some(parts.join(":"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
 }
 
 #[allow(dead_code)]
@@ -611,5 +921,38 @@ mod tests {
         assert!(parse_semver("v22.19.0").unwrap() >= MIN_NODE_VERSION);
         assert!(parse_semver("v22.20.1").unwrap() >= MIN_NODE_VERSION);
         assert!(parse_semver("v20.0.0").unwrap() < MIN_NODE_VERSION);
+    }
+
+    #[test]
+    fn picks_first_candidate_with_ok_version() {
+        let cands = vec![
+            ("old-node".to_string(), Some("v20.0.0".to_string())),
+            ("good-node".to_string(), Some("v22.19.0".to_string())),
+            ("best-node".to_string(), Some("v24.1.0".to_string())),
+        ];
+        assert_eq!(pick_best_node(&cands).as_deref(), Some("good-node"));
+    }
+
+    #[test]
+    fn picks_any_version_when_none_ok() {
+        let cands = vec![
+            ("old-node".to_string(), Some("v20.0.0".to_string())),
+            ("broken-node".to_string(), None),
+        ];
+        assert_eq!(pick_best_node(&cands).as_deref(), Some("old-node"));
+    }
+
+    #[test]
+    fn picks_first_when_no_version_at_all() {
+        let cands = vec![
+            ("a-node".to_string(), None),
+            ("b-node".to_string(), None),
+        ];
+        assert_eq!(pick_best_node(&cands).as_deref(), Some("a-node"));
+    }
+
+    #[test]
+    fn picks_none_for_empty_candidates() {
+        assert!(pick_best_node(&[]).is_none());
     }
 }

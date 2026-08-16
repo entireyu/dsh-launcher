@@ -110,6 +110,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::detect_env,
+            commands::get_platform,
             commands::install_node,
             commands::upgrade_node,
             commands::install_node_nvm,
@@ -135,6 +136,7 @@ pub fn run() {
             pet::quit_app,
             update::whalito_version_info,
             update::whalito_check_update,
+            update::whalito_apply_update,
             pet::pet_status,
             pet::pet_open_session,
             pet::pet_respond,

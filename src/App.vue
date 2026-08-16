@@ -43,6 +43,8 @@ interface Settings {
 const env = ref<EnvInfo | null>(null);
 const server = ref<ServerStatus>({ phase: "stopped", url: null, pid: null });
 const settings = ref<Settings | null>(null);
+// 当前平台（"windows" / "macos" / "linux"），由后端 get_platform 命令返回。
+const platform = ref<string>("windows");
 const logs = ref<string[]>([]);
 const busy = ref<string | null>(null);
 const error = ref<string>("");
@@ -638,6 +640,7 @@ onMounted(async () => {
   window.addEventListener("message", handleWhalitoMessage);
 
   await Promise.all([loadSettings(), refreshLogs()]);
+  platform.value = await invoke<string>("get_platform").catch(() => "windows");
   pollTimer = window.setInterval(refreshStatus, 3000);
   await runFlow();
   checkLatest();
@@ -715,13 +718,27 @@ function autoScroll() {
               :disabled="installingNode"
               @click="env?.found ? upgradeNode() : installNode()"
             >
-              {{ installingNode ? "正在安装…" : env?.found ? "一键升级（winget）" : "一键安装（winget）" }}
+              {{
+                installingNode
+                  ? "正在安装…"
+                  : env?.found
+                    ? platform === "windows"
+                      ? "一键升级（winget）"
+                      : "一键升级 Node"
+                    : platform === "windows"
+                      ? "一键安装（winget）"
+                      : "一键安装 Node 22"
+              }}
             </button>
             <button :disabled="installingNode" @click="installNodePortable">
               自定义安装目录…
             </button>
           </div>
           <p v-if="env?.nvmFound" class="hint good">已检测到 nvm（{{ env.nvmPath }}）</p>
+          <p v-if="platform === 'macos'" class="hint">
+            鲸仔将下载 Node.js 22 官方安装包到「~/Library/Application
+            Support」，无需管理员权限。
+          </p>
         </div>
 
         <!-- 安装 dsh -->

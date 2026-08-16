@@ -33,9 +33,9 @@
 
 | 项目 | 要求 |
 | --- | --- |
-| 操作系统 | Windows 10（版本 1809 及以上）/ Windows 11 |
-| 架构 | x64（64 位） |
-| WebView2 Runtime | 首次安装时由安装器自动安装（Windows 11 已内置） |
+| 操作系统 | Windows 10（版本 1809 及以上）/ Windows 11 · macOS 12+（Apple Silicon / Intel） |
+| 架构 | Windows：x64（64 位）；macOS：universal（Apple Silicon 与 Intel 通用） |
+| WebView2 Runtime | Windows：首次安装时由安装器自动安装（Windows 11 已内置）；macOS 无需 |
 
 ### DeepSeek Harness 依赖（鲸仔自动处理）
 
@@ -49,17 +49,46 @@
 
 ## 🚀 快速开始
 
+### Windows
+
 1. 在 [Releases](https://github.com/entireyu/dsh-whalito-desk/releases) 下载最新安装包 `Whalito_0.3.0_x64-setup.exe`
 2. 双击安装（首次运行 Windows SmartScreen 会提示「未知发布者」，点击「仍要运行」即可）
 3. 打开鲸仔，其余交给它 —— 检测、补齐、启动全程自动
 4. 关闭窗口即最小化到托盘，需要时点击托盘图标唤回
+
+### macOS（内部测试版）
+
+1. 在 [Releases](https://github.com/entireyu/dsh-whalito-desk/releases) 下载最新 `Whalito_0.3.0_universal.dmg`
+2. 双击挂载，把「Whalito」拖入「应用程序」（Applications）
+3. **首次打开**：安装包为内部测试版（未签名公证），请勿直接双击图标——在 Finder 中**右键 App → 打开 → 再点「打开」**确认一次，之后即可正常双击启动
+4. 打开鲸仔，其余交给它 —— 检测、补齐、启动全程自动；关闭窗口即隐藏到托盘（菜单栏图标）
+
+macOS 环境检测与安装说明：
+
+- 鲸仔按优先级检测 Node：自定义/便携目录 → nvm（`~/.nvm`）→ fnm/volta → Homebrew（`/opt/homebrew`、`/usr/local`）→ 系统自带（通常过旧，会提示升级）→ PATH
+- 未检测到 Node 时，一键安装会下载 Node.js 22 官方 tar 包到 `~/Library/Application Support/com.deepseek.dsh-launcher/node/`，**全程无需管理员权限**；检测到 nvm 时也可用 nvm 安装
+- 开机自启通过用户级 LaunchAgent（`~/Library/LaunchAgents/com.deepseek.dsh-launcher.plist`）实现，同样无需管理员权限
+- 卸载：删除「应用程序/Whalito.app」即可；如需彻底清理，另删 `~/Library/Application Support/com.deepseek.dsh-launcher`、上述 plist 与 `~/.dsh`（注意后者包含你的 Harness 数据）
+
+#### macOS 冒烟测试清单（内部测试者随包自检）
+
+- [ ] dmg 挂载 → 拖入应用程序 → 首次右键「打开」绕过 Gatekeeper，之后双击可正常启动
+- [ ] 全新机器：一键安装 Node 22（tar 包）→ 自动安装 Harness → 服务器启动 → 应用内打开 Harness
+- [ ] 已装 Homebrew / nvm 的机器：检测即用，不重复安装
+- [ ] 系统自带 `/usr/bin/node` 过旧时正确提示版本要求并引导安装
+- [ ] Harness 原生插件（`node-addon-landlock-run-darwin-*`、`koffi-darwin-*` 等 optionalDependencies）可随 npm 正常安装（首验项）
+- [ ] 托盘菜单：打开面板 / 启动 / 停止 / 在浏览器打开 / 桌宠 / 退出
+- [ ] 桌宠透明、置顶、可拖拽，位置持久化；设置里开关即时生效
+- [ ] 开机自启开关 → 注销重登后自动启动（LaunchAgent）
+- [ ] 服务器运行中，DSH 内使用 git 等 shell 工具的技能正常（PATH 注入生效）
+- [ ] 检查更新 → 立即更新：下载 dmg → 覆盖安装 → 自动重启为新版本
 
 ## 功能一览
 
 | 能力 | 说明 |
 | --- | --- |
 | 环境检测 | 自动识别 Node.js / npm / Harness 是否就绪 |
-| 一键安装 Node.js | 支持 winget、nvm、自定义目录便携版 |
+| 一键安装 Node.js | Windows：winget / nvm / 便携 zip；macOS：官方 tar 包（免管理员）/ nvm / 自定义目录 |
 | 安装 / 更新 Harness | 支持切换 npm 镜像源，国内更快 |
 | 服务器管理 | 一键启动 / 停止 / 重启，异常自动拉起 |
 | 鲸仔设置分区 | DSH 设置面板内直接管理鲸仔设置（端口 / 镜像 / 自启 / 桌宠 / 版本检查与一键更新等），取代悬浮按钮 |
@@ -68,7 +97,7 @@
 
 ## 🛠 开发者
 
-鲸仔基于 **Tauri 2 + Vue 3 + TypeScript** 构建，Windows 优先。
+鲸仔基于 **Tauri 2 + Vue 3 + TypeScript** 构建，支持 Windows 与 macOS。
 
 ### 目录结构
 
@@ -108,6 +137,20 @@ pnpm tauri:build:test   # 测试包：Whalito-Test_0.3.0_x64-setup.exe（DSH 端
 
 > 安装包当前未签名，Windows SmartScreen 会提示「未知发布者」，属预期；正式分发建议配置代码签名证书。
 
+### macOS 构建（GitHub Actions）
+
+macOS 产物（`.app` / `.dmg`）无法在 Windows/Linux 上交叉编译，由 GitHub Actions 的 macOS runner 构建（见 `.github/workflows/release.yml`）：
+
+```bash
+# 本地 macOS 机器上等价命令：
+rustup target add x86_64-apple-darwin
+pnpm tauri build --target universal-apple-darwin --config src-tauri/tauri.macos.conf.json
+```
+
+- 打 `v*` tag 或手动触发 Release workflow → CI 同时构建 Windows NSIS 与 macOS universal dmg，并上传到 GitHub Release（资产名如 `Whalito_0.3.0_universal.dmg`）
+- 产物为 ad-hoc 签名（内部测试分发；未公证，用户右键 → 打开）。正式对外分发需配置 Apple Developer ID 证书并启用 notarytool 公证（工作流内已预留注释位）
+- macOS 版本更新器匹配 Release 中的 `.dmg` 资产（Windows 匹配 `_x64-setup.exe`），一键更新会自动挂载 dmg 覆盖安装并重启
+
 ### 桌宠样式 API（pet-style.json）
 
 桌宠外观由样式契约文件驱动，文件变更 2 秒内热更新（无需重启）：
@@ -143,10 +186,11 @@ pnpm tauri:build:test   # 测试包：Whalito-Test_0.3.0_x64-setup.exe（DSH 端
 
 | 动作 | 实际执行 |
 | --- | --- |
-| 检测 Node | `where.exe node` / `node --version` / 兜底 `C:\Program Files\nodejs\node.exe` |
-| 装 Node | `winget install/upgrade OpenJS.NodeJS.LTS`；nvm：`nvm install 22.x` + `nvm use`；便携：下载 node zip 解压到用户目录 |
-| 装 / 更新 Harness | `node <npm-cli.js> install -g @deepseek-ai/dsh[ @latest]` |
+| 检测 Node | Windows：`where.exe node` / `node --version` / 兜底 `C:\Program Files\nodejs\node.exe`；macOS：按优先级探测 自定义目录 → nvm（`~/.nvm`）→ fnm/volta → Homebrew → `/usr/bin/node` → PATH，并逐个 `node --version` 验证 |
+| 装 Node | Windows：`winget install/upgrade OpenJS.NodeJS.LTS`；nvm：`nvm install 22.x` + `nvm use`；便携：下载 node zip 解压到用户目录。macOS：下载 `node-v22.x-darwin-{arm64,x64}.tar.gz` → `/usr/bin/tar` 解压到 `~/Library/Application Support/com.deepseek.dsh-launcher/node/`（免管理员）；nvm：`bash/zsh -lc 'source nvm.sh && nvm install 22 && nvm alias default 22'` 并回写解析出的 node 绝对路径 |
+| 装 / 更新 Harness | `node <npm-cli.js> install -g @deepseek-ai/dsh[ @latest]`（应用专用前缀，隔离免管理员） |
 | 校验 | `node <dsh/bin.js> --version` + `--dump-default-config` |
-| 启动 | `node <dsh/bin.js> web --port <port>` |
-| 停止 | `taskkill /PID <pid> /T /F` |
+| 启动 | `node <dsh/bin.js> web --port <port>`（macOS 额外注入用户 shell PATH） |
+| 停止 | Windows：`taskkill /PID <pid> /T /F`；macOS/Linux：`kill <pid>` |
+| 开机自启 | Windows：注册表 Run 键；macOS：`~/Library/LaunchAgents/com.deepseek.dsh-launcher.plist` |
 | 健康检查 | `GET <解析出的 URL>`（800ms 超时） |

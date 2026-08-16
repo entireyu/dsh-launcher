@@ -56,6 +56,11 @@ jobs:
       # 内部分发：ad-hoc 签名（未公证），用户首次打开需右键 → 打开。
       # 未来正式分发：设置 APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD /
       # APPLE_SIGNING_IDENTITY / APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID 即可。
+      - name: Extract release notes from CHANGELOG
+        if: startsWith(github.ref, 'refs/tags/')
+        id: notes
+        run: node .github/release-notes.js
+
       - name: Publish to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: tauri-apps/tauri-action@v0
@@ -64,6 +69,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Whalito ${{ github.ref_name }}"
+          releaseBody: ${{ steps.notes.outputs.body }}
           args: --target universal-apple-darwin --config src-tauri/tauri.macos.conf.json
 
   build-windows:
@@ -104,6 +110,11 @@ jobs:
           if-no-files-found: error
 
       # tag 运行：构建并发布到 GitHub Release
+      - name: Extract release notes from CHANGELOG
+        if: startsWith(github.ref, 'refs/tags/')
+        id: notes
+        run: node .github/release-notes.js
+
       - name: Publish to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: tauri-apps/tauri-action@v0
@@ -112,3 +123,4 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Whalito ${{ github.ref_name }}"
+          releaseBody: ${{ steps.notes.outputs.body }}

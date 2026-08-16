@@ -6,6 +6,9 @@
 
 ## [Unreleased]
 
+### 修复
+- 修复「鲸仔设置」里检查更新发现新版本后「立即更新」按钮点击无反应：`window.confirm` 在 WebView2 中不可用（默认脚本对话框只支持 alert，confirm 静默返回 false），确认改为 Rust 侧 tauri-plugin-dialog 原生对话框（取消则静默退出）
+
 ## [0.4.0] - 2026-08-16
 
 ### 新增

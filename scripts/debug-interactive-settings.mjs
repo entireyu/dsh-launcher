@@ -28,6 +28,9 @@ const fakeWindow = {
   removeEventListener() {},
   setInterval: () => 0,
   clearInterval: () => {},
+  // WebView2 里 window.confirm 是函数但静默返回 false（默认脚本对话框只支持
+  // alert）——「立即更新」不得依赖它，点击必须直接发送 apply-update。
+  confirm: () => false,
 };
 new Function("window", clientJs)(fakeWindow);
 
@@ -171,7 +174,8 @@ assert.ok(
 );
 console.log("ok: 检查更新流程（DSH/鲸仔/打开下载页）");
 
-// 立即更新：点击 → 发送 apply-update → 父窗口回传进度 → 显示进度文案
+// 立即更新：点击 → 发送 apply-update（确认由 Rust 原生对话框完成，
+// 前端不依赖 window.confirm——它在 WebView2 里静默返回 false）→ 父窗口回传进度 → 显示进度文案
 const applyBtn = renderer.root.findAll(
   (n) => n.type === "button" && n.props.children === "立即更新",
 )[0];

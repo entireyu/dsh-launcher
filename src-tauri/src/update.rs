@@ -95,6 +95,9 @@ pub fn whalito_check_update() -> Result<WhalitoVersionInfo, String> {
 /// 一键更新：检查 → 选资产 → 下载 → 静默安装 → 退出并由安装链重启应用。
 #[tauri::command]
 pub async fn whalito_apply_update(app: AppHandle) -> Result<(), String> {
+    if !confirm_update(&app).await? {
+        return Ok(());
+    }
     emit(&app, "正在获取最新版本…");
     let info = tauri::async_runtime::spawn_blocking(fetch_release_info)
         .await
@@ -116,6 +119,27 @@ pub async fn whalito_apply_update(app: AppHandle) -> Result<(), String> {
     spawn_update_chain(&dest)?;
     app.exit(0);
     Ok(())
+}
+
+/// 更新确认对话框。window.confirm 在 WebView2 中不可用（默认脚本对话框只支持
+/// alert，confirm 静默返回 false），确认改走 tauri-plugin-dialog 的原生对话框；
+/// 用户取消返回 Ok(false)（无错误，静默结束）。
+async fn confirm_update(app: &AppHandle) -> Result<bool, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        handle
+            .dialog()
+            .message("将下载并安装鲸仔新版本，应用会自动重启。继续？")
+            .title("鲸仔更新")
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "立即更新".to_string(),
+                "取消".to_string(),
+            ))
+            .blocking_show()
+    })
+    .await
+    .map_err(|e| format!("显示更新确认对话框失败：{e}"))
 }
 
 /// 选择当前平台 + 变体适用的安装包资产：

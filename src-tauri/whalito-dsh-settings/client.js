@@ -279,13 +279,9 @@
                   type: 'button',
                   style: presetActiveStyle,
                   onClick: function () {
-                    if (
-                      typeof window.confirm === 'function' &&
-                      !window.confirm('将下载并安装鲸仔新版本（' + info.latest + '），应用会自动重启。继续？')
-                    ) {
-                      return;
-                    }
-                    updateStage[1]('正在准备更新…');
+                    // window.confirm 在 WebView2 中不可用：默认脚本对话框只支持
+                    // alert，confirm 静默返回 false。确认由 Rust 侧原生对话框完成
+                    // （whalito_apply_update 先弹确认，取消则静默结束）。
                     sendAction('apply-update');
                   },
                 }, '立即更新')

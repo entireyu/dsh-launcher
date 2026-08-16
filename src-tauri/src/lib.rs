@@ -16,6 +16,9 @@ use tauri::{
 use state::AppState;
 
 pub(crate) fn show_main(app: &tauri::AppHandle) {
+    // 打开主界面视为用户已查看桌宠通知（任务完成/被阻塞/被中断）→ 清除，
+    // 桌宠随即回到"空闲中"。
+    crate::pet::clear_notice(app);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();

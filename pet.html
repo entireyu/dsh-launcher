@@ -17,6 +17,13 @@
         user-select: none;
         -webkit-user-select: none;
       }
+
+      /* 挂载点必须有确定高度，否则 .pet 的 height:100% 会退化为 auto，
+         布局整体塌陷到窗口顶部（鲸仔被裁切、气泡被鲸仔遮挡）。 */
+      #pet {
+        width: 100%;
+        height: 100%;
+      }
     </style>
   </head>
 

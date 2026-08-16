@@ -7,6 +7,7 @@
 //! 网络路径全部走本机 loopback（`127.0.0.1`），满足 Harness 的 `/api` 信任栅栏，
 //! 因此无需鉴权，也绕开了 Tauri WebView 的 Origin/CORS 限制。
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,6 +80,65 @@ impl PetState {
             subagent_count: 0,
             error: Some(reason),
         }
+    }
+}
+
+/// 桌宠待查看通知：任务完成 / 被阻塞 / 被中断。
+/// 设置后持续展示，直到用户打开主界面（show_main → clear_notice）才清除。
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PetNotice {
+    /// completed / blocked / interrupted。
+    pub kind: String,
+    /// 关联会话的标题（projections.title），可能为空。
+    pub title: Option<String>,
+    /// 关联会话的目标（projections.goal.objective），可能为空。
+    pub goal: Option<String>,
+}
+
+/// 运行中的主会话集合：session_id → (标题, 目标文本, 目标是否 blocked)。
+/// 排除空白会话与子代理（与 Pet.vue 的 runningSessions 过滤一致）。
+type RunningMap = HashMap<String, (Option<String>, Option<String>, bool)>;
+
+/// 从会话 projections 的 goal 值中取出 objective 文本。
+fn goal_objective(goal: &Value) -> Option<String> {
+    goal.get("objective")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+}
+
+/// 计算一次轮询后的完成类通知：上一轮有运行中的主会话、这一轮全部结束
+/// （结束 / 被阻塞 / 从列表消失）。任一结束会话的目标为 blocked 时报告
+/// "blocked"，否则 "completed"；文案取最有信息量的会话（有目标者优先）。
+fn detect_completion(prev: &RunningMap, current: &RunningMap) -> Option<PetNotice> {
+    if prev.is_empty() || !current.is_empty() {
+        return None;
+    }
+    let blocked = prev.values().any(|v| v.2);
+    let best = prev
+        .values()
+        .find(|v| v.1.is_some())
+        .or_else(|| prev.values().find(|v| v.0.is_some()))
+        .or_else(|| prev.values().next());
+    let (title, goal, _) = best?;
+    Some(PetNotice {
+        kind: if blocked { "blocked" } else { "completed" }.to_string(),
+        title: title.clone(),
+        goal: goal.clone(),
+    })
+}
+
+/// 服务器不可达（stopped 阶段）时上一阶段仍有任务在跑 → 任务被中断。
+/// running / error 阶段都可能仍有在跑的任务（error 仅表示 session.list 拉取失败）。
+fn detect_interruption(last_phase: Option<&str>, had_running: bool) -> Option<PetNotice> {
+    if matches!(last_phase, Some("running" | "error")) && had_running {
+        Some(PetNotice {
+            kind: "interrupted".to_string(),
+            title: None,
+            goal: None,
+        })
+    } else {
+        None
     }
 }
 
@@ -192,11 +252,35 @@ fn poll_state(base: &str) -> Result<PetState, String> {
 }
 
 /// 推送一次状态快照到 pet 窗口，并缓存供 `pet_status` 即时返回。
+/// 快照附带当前待查看通知（AppState.pet_notice）。
 fn emit_state(app: &AppHandle, state: PetState) {
-    if let Ok(snapshot) = serde_json::to_value(&state) {
+    if let Ok(mut snapshot) = serde_json::to_value(&state) {
         let st = app.state::<AppState>();
+        let notice = st.pet_notice.lock().unwrap().clone();
+        if let Ok(nv) = serde_json::to_value(notice) {
+            snapshot["notice"] = nv;
+        }
         *st.pet_snapshot.lock().unwrap() = Some(snapshot.clone());
         let _ = app.emit("pet-state", snapshot);
+    }
+}
+
+/// 设置待查看通知（覆盖旧通知）；下一次 emit_state 会随快照广播到 pet 窗口。
+pub fn set_notice(app: &AppHandle, notice: PetNotice) {
+    let st = app.state::<AppState>();
+    *st.pet_notice.lock().unwrap() = Some(notice);
+}
+
+/// 用户打开主界面后清除待查看通知，并立即重发一份去掉 notice 的快照，
+/// 让 pet 马上回到"空闲中"，无需等待下一次轮询。
+pub fn clear_notice(app: &AppHandle) {
+    let st = app.state::<AppState>();
+    *st.pet_notice.lock().unwrap() = None;
+    let snapshot = st.pet_snapshot.lock().unwrap().clone();
+    if let Some(mut s) = snapshot {
+        s["notice"] = Value::Null;
+        *st.pet_snapshot.lock().unwrap() = Some(s.clone());
+        let _ = app.emit("pet-state", s);
     }
 }
 
@@ -315,6 +399,8 @@ fn orchestrator(app: AppHandle) {
     let mut last_url: Option<String> = None;
     let mut last_phase: Option<String> = None;
     let mut last_style_text: Option<String> = None;
+    // 上一轮轮询仍在运行的主会话（排除空白会话与子代理），用于完成/中断检测。
+    let mut prev_running: RunningMap = RunningMap::new();
 
     loop {
         let st = app.state::<AppState>();
@@ -352,6 +438,32 @@ fn orchestrator(app: AppHandle) {
                 }
                 match poll_state(&u) {
                     Ok(state) => {
+                        // 完成检测：上一轮在跑的主会话全部结束（结束 / 被阻塞 /
+                        // 从列表消失）→ 生成待查看通知，用户打开主界面后清除。
+                        let current_running: RunningMap = state
+                            .sessions
+                            .iter()
+                            .filter(|s| s.running && !s.blank && !s.is_subagent)
+                            .map(|s| {
+                                (
+                                    s.session_id.clone(),
+                                    (
+                                        s.title.clone(),
+                                        s.goal.as_ref().and_then(goal_objective),
+                                        s.goal
+                                            .as_ref()
+                                            .and_then(|g| g.get("phase"))
+                                            .and_then(|p| p.as_str())
+                                            == Some("blocked"),
+                                    ),
+                                )
+                            })
+                            .collect();
+                        if let Some(notice) = detect_completion(&prev_running, &current_running) {
+                            pet_log(&format!("pet notice: {}", notice.kind));
+                            set_notice(&app, notice);
+                        }
+                        prev_running = current_running;
                         if last_phase.as_deref() != Some("running") {
                             pet_log(&format!("poll ok, base={u}"));
                             last_phase = Some("running".into());
@@ -375,6 +487,12 @@ fn orchestrator(app: AppHandle) {
                     s.store(true, Ordering::SeqCst);
                 }
                 last_url = None;
+                // 中断检测：服务器不可达，且中断前仍有主会话在跑。
+                if let Some(notice) = detect_interruption(last_phase.as_deref(), !prev_running.is_empty()) {
+                    pet_log(&format!("pet notice: {}", notice.kind));
+                    set_notice(&app, notice);
+                    prev_running.clear();
+                }
                 if last_phase.as_deref() != Some("stopped") {
                     pet_log("no reachable server (recorded url and configured port both unhealthy)");
                     last_phase = Some("stopped".into());
@@ -506,4 +624,81 @@ pub fn quit_app(app: AppHandle) {
     app.state::<AppState>().quitting.store(true, Ordering::SeqCst);
     app.state::<AppState>().pet_stop.store(true, Ordering::SeqCst);
     app.exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn running(
+        id: &str,
+        title: Option<&str>,
+        goal: Option<&str>,
+        blocked: bool,
+    ) -> (String, (Option<String>, Option<String>, bool)) {
+        (
+            id.to_string(),
+            (
+                title.map(String::from),
+                goal.map(String::from),
+                blocked,
+            ),
+        )
+    }
+
+    #[test]
+    fn no_completion_when_nothing_was_running() {
+        assert_eq!(detect_completion(&RunningMap::new(), &RunningMap::new()), None);
+    }
+
+    #[test]
+    fn no_completion_while_a_session_still_runs() {
+        let prev = RunningMap::from([running("a", None, None, false)]);
+        let cur = RunningMap::from([running("a", None, None, false)]);
+        assert_eq!(detect_completion(&prev, &cur), None);
+    }
+
+    #[test]
+    fn completion_prefers_goal_text() {
+        let prev = RunningMap::from([
+            running("a", Some("会话A"), None, false),
+            running("b", None, Some("目标B"), false),
+        ]);
+        let n = detect_completion(&prev, &RunningMap::new()).unwrap();
+        assert_eq!(n.kind, "completed");
+        assert_eq!(n.goal.as_deref(), Some("目标B"));
+    }
+
+    #[test]
+    fn completion_falls_back_to_title() {
+        let prev = RunningMap::from([running("a", Some("会话A"), None, false)]);
+        let n = detect_completion(&prev, &RunningMap::new()).unwrap();
+        assert_eq!(n.kind, "completed");
+        assert_eq!(n.title.as_deref(), Some("会话A"));
+    }
+
+    #[test]
+    fn blocked_beats_completed() {
+        let prev = RunningMap::from([
+            running("a", None, Some("目标A"), false),
+            running("b", None, Some("目标B"), true),
+        ]);
+        let n = detect_completion(&prev, &RunningMap::new()).unwrap();
+        assert_eq!(n.kind, "blocked");
+    }
+
+    #[test]
+    fn interruption_only_on_running_to_stopped_transition() {
+        let n = detect_interruption(Some("running"), true).unwrap();
+        assert_eq!(n.kind, "interrupted");
+        // error 阶段（服务器在但列表拉取失败）同样可能有任务在跑。
+        assert_eq!(
+            detect_interruption(Some("error"), true).unwrap().kind,
+            "interrupted"
+        );
+        assert_eq!(detect_interruption(Some("running"), false), None);
+        assert_eq!(detect_interruption(Some("error"), false), None);
+        assert_eq!(detect_interruption(Some("stopped"), true), None);
+        assert_eq!(detect_interruption(None, true), None);
+    }
 }

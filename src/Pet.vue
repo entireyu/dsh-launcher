@@ -33,6 +33,15 @@ interface PetState {
   runningCount: number;
   subagentCount: number;
   error: string | null;
+  /** 待查看通知（任务完成 / 被阻塞 / 被中断）；打开主界面后由后端清除。 */
+  notice: PetNotice | null;
+}
+
+/** 桌宠待查看通知：设置后持续展示，直到用户打开主界面才清除。 */
+interface PetNotice {
+  kind: "completed" | "blocked" | "interrupted";
+  title: string | null;
+  goal: string | null;
 }
 
 interface PetAlert {
@@ -101,24 +110,67 @@ const phaseLabel = computed(() => {
   if (!state.value) return "正在连接…";
   if (state.value.phase === "error") return state.value.error ?? "无法连接服务器";
   if (state.value.phase === "stopped") return "服务器未运行";
-  if (state.value.runningCount === 0) return "空闲中";
   return null;
 });
+
+/** 服务器正常且无任何任务/后台代理在跑（"空闲中"的判定条件）。 */
+const idle = computed(
+  () => !!state.value && state.value.phase === "running" && state.value.runningCount === 0,
+);
+
+/** 任务被中断通知：服务器停止或恢复空闲时展示，直到打开主界面才清除；
+ *  有任务在跑时优先展示任务进度，连接异常时优先展示错误信息。 */
+const interruptedNotice = computed(() => {
+  const st = state.value;
+  const n = st?.notice;
+  if (!st || n?.kind !== "interrupted") return null;
+  if (st.runningCount > 0 || st.phase === "error") return null;
+  return n;
+});
+
+/** 任务完成/被阻塞通知：仅在空闲时展示（有任务在跑时展示任务进度）。 */
+const completedNotice = computed(() => {
+  const n = state.value?.notice;
+  if (!n || n.kind === "interrupted" || !idle.value) return null;
+  return n;
+});
+
+/** 待查看通知触发注意力动画（与审批/提问同款提醒）。 */
+const attention = computed(
+  () =>
+    (alertCount.value > 0 || interruptedNotice.value !== null || completedNotice.value !== null) &&
+    anim.value.attention,
+);
 
 const bubbleTitle = computed(() => {
   const a = firstApproval.value;
   if (a) return a.toolName ? `需要确认：${a.toolName}` : "需要你确认";
   if (questions.value.length > 0) return "需要你回答";
+  if (interruptedNotice.value) return "任务已中断";
   if (phaseLabel.value) return phaseLabel.value;
+  const done = completedNotice.value;
+  if (done) return done.kind === "blocked" ? "任务被阻塞" : "任务已完成 🎉";
   if (goalObjective.value) return goalObjective.value;
   if (primary.value?.title) return primary.value.title;
+  if (idle.value) return "空闲中";
   return "工作中…";
 });
 
 const bubbleSub = computed(() => {
-  if (firstApproval.value) return firstApproval.value.reason ?? "点击打开应用确认";
+  const a = firstApproval.value;
+  if (a) return a.reason ?? "点击打开应用确认";
   if (questions.value.length > 0) return "点击打开应用回答";
+  if (interruptedNotice.value) return "服务器已断开，点击打开面板查看";
   if (phaseLabel.value) return null;
+  const done = completedNotice.value;
+  if (done) {
+    const what = done.goal ?? done.title;
+    if (done.kind === "blocked") {
+      return what ? `被阻塞：${what}` : "点击打开面板处理";
+    }
+    return what ? `已完成：${what}` : "点击打开面板查看详情";
+  }
+  if (idle.value) return null;
   const parts: string[] = [];
   if (state.value) {
     parts.push(`${state.value.runningCount} 个任务运行中`);
@@ -378,7 +430,7 @@ window.addEventListener("unhandledrejection", (e) => {
     <!-- 鲸仔本体（按住拖拽 / 轻点打开主界面） -->
     <div
       class="whale"
-      :class="{ bob: anim.bob, attention: alertCount > 0 && anim.attention }"
+      :class="{ bob: anim.bob, attention }"
       :style="whaleStyle"
       @mousedown="onWhaleMouseDown"
       @click="onWhaleClick"
@@ -409,10 +461,12 @@ window.addEventListener("unhandledrejection", (e) => {
   position: relative;
   width: 100%;
   height: 100%;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: flex-end;
+  /* 底部预留动画余量：鲸仔贴窗口底边时，attention 的 scale 会越界被裁切。 */
   padding-bottom: 14px;
   font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
 }
@@ -423,6 +477,9 @@ window.addEventListener("unhandledrejection", (e) => {
   left: 50%;
   transform: translateX(-50%);
   width: 188px;
+  /* 气泡（对话框）始终绘制在鲸仔之上：即使内容较长与鲸仔重叠，
+     也不被鲸仔的深色圆形底遮住。 */
+  z-index: 2;
   background: #171a21;
   border: 1px solid #2a2f3a;
   border-radius: 12px;
@@ -464,6 +521,11 @@ window.addEventListener("unhandledrejection", (e) => {
   font-size: 11px;
   color: #9aa3b2;
   word-break: break-all;
+  /* 副文本限 3 行：防止超长审批理由把气泡撑出窗口被裁切。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .bubble-actions {
@@ -497,6 +559,7 @@ window.addEventListener("unhandledrejection", (e) => {
 
 .whale {
   position: relative;
+  z-index: 1;
   cursor: pointer;
 }
 

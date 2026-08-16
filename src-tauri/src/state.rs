@@ -42,6 +42,8 @@ pub struct AppState {
     pub pet_stop: Arc<AtomicBool>,
     /// 最近一次桌宠状态快照（JSON），供 pet_status 命令即时返回。
     pub pet_snapshot: Arc<Mutex<Option<serde_json::Value>>>,
+    /// 桌宠待查看通知（任务完成 / 被阻塞 / 被中断）；打开主界面后清除。
+    pub pet_notice: Arc<Mutex<Option<crate::pet::PetNotice>>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

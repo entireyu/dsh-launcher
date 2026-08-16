@@ -34,3 +34,9 @@ zip = "2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+
+# macOS：桌宠窗口需要透明（transparent）+ 无阴影（shadow），
+# 这两个 API 在 macOS 上由 tauri 的 macos-private-api feature 提供
+# （内部分发 ad-hoc 签名可用；该 feature 使用 Apple 私有 API，不能上架 App Store）。
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }

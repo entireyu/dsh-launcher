@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -142,6 +142,64 @@ const attention = computed(
     anim.value.attention,
 );
 
+// —— 空闲冒泡机制：空闲中不常驻气泡，每隔一段时间轻轻冒一下泡。 ——
+/** 每次冒泡展示时长（ms）。 */
+const IDLE_BUBBLE_SHOW_MS = 4000;
+/** 两次冒泡之间的间隔范围（ms），随机取值避免机械感。 */
+const IDLE_BUBBLE_GAP_MIN_MS = 20000;
+const IDLE_BUBBLE_GAP_MAX_MS = 50000;
+
+const idleBubbleVisible = ref(false);
+let idleHideTimer: number | undefined;
+let idleNextTimer: number | undefined;
+
+function clearIdleBubbleTimers() {
+  if (idleHideTimer !== undefined) {
+    window.clearTimeout(idleHideTimer);
+    idleHideTimer = undefined;
+  }
+  if (idleNextTimer !== undefined) {
+    window.clearTimeout(idleNextTimer);
+    idleNextTimer = undefined;
+  }
+}
+
+/** 冒一次泡：展示数秒后收起，再排下一次。 */
+function popIdleBubble() {
+  idleBubbleVisible.value = true;
+  idleHideTimer = window.setTimeout(() => {
+    idleBubbleVisible.value = false;
+    scheduleIdleBubble(false);
+  }, IDLE_BUBBLE_SHOW_MS);
+}
+
+/** 排下一次冒泡：进入空闲后很快冒第一次，之后按随机间隔。 */
+function scheduleIdleBubble(first: boolean) {
+  clearIdleBubbleTimers();
+  const delay = first
+    ? 2000
+    : IDLE_BUBBLE_GAP_MIN_MS + Math.random() * (IDLE_BUBBLE_GAP_MAX_MS - IDLE_BUBBLE_GAP_MIN_MS);
+  idleNextTimer = window.setTimeout(popIdleBubble, delay);
+}
+
+/** 空闲冒泡的生效条件：无审批/提问/待查看通知/连接异常，且服务器正常无任务。 */
+const showIdle = computed(() => {
+  if (firstApproval.value || questions.value.length > 0) return false;
+  if (interruptedNotice.value || completedNotice.value || phaseLabel.value) return false;
+  return idle.value;
+});
+
+// 进入空闲 → 启动冒泡循环；离开空闲（来任务/通知/异常）→ 收起并停止。
+watch(showIdle, (on) => {
+  if (on) {
+    idleBubbleVisible.value = false;
+    scheduleIdleBubble(true);
+  } else {
+    clearIdleBubbleTimers();
+    idleBubbleVisible.value = false;
+  }
+});
+
 const bubbleTitle = computed(() => {
   const a = firstApproval.value;
   if (a) return a.toolName ? `需要确认：${a.toolName}` : "需要你确认";
@@ -152,7 +210,8 @@ const bubbleTitle = computed(() => {
   if (done) return done.kind === "blocked" ? "任务被阻塞" : "任务已完成 🎉";
   if (goalObjective.value) return goalObjective.value;
   if (primary.value?.title) return primary.value.title;
-  if (idle.value) return "空闲中";
+  // 空闲中：仅在冒泡窗口内展示，其余时间气泡收起。
+  if (idle.value) return idleBubbleVisible.value ? "空闲中" : null;
   return "工作中…";
 });
 
@@ -397,6 +456,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  clearIdleBubbleTimers();
   unlisteners.forEach((u) => u());
 });
 
@@ -472,13 +532,11 @@ window.addEventListener("unhandledrejection", (e) => {
 }
 
 .bubble {
-  position: absolute;
-  top: 8px;
-  left: 50%;
-  transform: translateX(-50%);
+  /* 改为弹性流布局：紧贴鲸仔头顶上方（8px 间距，箭头恰好指向鲸仔），
+     不再固定窗口顶部；内容较长与鲸仔重叠时靠 z-index 保证对话框在上层。 */
+  position: relative;
   width: 188px;
-  /* 气泡（对话框）始终绘制在鲸仔之上：即使内容较长与鲸仔重叠，
-     也不被鲸仔的深色圆形底遮住。 */
+  margin-bottom: 8px;
   z-index: 2;
   background: #171a21;
   border: 1px solid #2a2f3a;
@@ -488,10 +546,12 @@ window.addEventListener("unhandledrejection", (e) => {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   cursor: pointer;
   text-align: left;
+  /* 气泡出现时轻淡入（空闲冒泡/状态切换都会重新挂载触发）。 */
+  animation: bubbleIn 0.25s ease-out;
 }
 
 .bubble.float {
-  animation: float 3s ease-in-out infinite;
+  animation: bubbleIn 0.25s ease-out, float 3s ease-in-out infinite;
 }
 
 .bubble::after {
@@ -649,10 +709,19 @@ window.addEventListener("unhandledrejection", (e) => {
 @keyframes float {
   0%,
   100% {
-    transform: translateX(-50%) translateY(0);
+    transform: translateY(0);
   }
   50% {
-    transform: translateX(-50%) translateY(-4px);
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes bubbleIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
   }
 }
 </style>

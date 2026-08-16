@@ -4,7 +4,7 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.4.1] - 2026-08-16
 
 ### 优化
 - 预留：启动 DSH 时注入 `DSH_DIALOG_OWNER_HWND` 环境变量（鲸仔主窗口句柄），供未来支持 owner 窗口的 DSH 原生目录选择器使用——不改动 DSH 源码，当前 DSH 版本忽略该变量
@@ -105,6 +105,7 @@
 - 安装 / 启动等阻塞命令改为异步，修复点击安装后界面卡死
 - 探测端口上外部已运行的 DSH 服务器，修复误报已停止
 
+[0.4.1]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.1.1...v0.2.0

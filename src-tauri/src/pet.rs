@@ -612,6 +612,15 @@ pub fn pet_set_enabled(app: AppHandle, enabled: bool) -> Result<bool, String> {
     set_enabled(&app, enabled)
 }
 
+/// 切换桌宠可见性（与托盘菜单一致）：按 Rust 当前状态翻转并返回新值。
+/// 前端用它做右键菜单切换，避免依赖可能与后端错位的前端缓存值。
+#[tauri::command]
+pub fn pet_toggle(app: AppHandle) -> Result<bool, String> {
+    let st = app.state::<AppState>();
+    let enabled = !st.settings.lock().unwrap().pet_enabled;
+    set_enabled(&app, enabled)
+}
+
 /// 桌宠右键菜单：显示并聚焦主窗口（与托盘"打开面板"一致）。
 #[tauri::command]
 pub fn show_main_window(app: AppHandle) {

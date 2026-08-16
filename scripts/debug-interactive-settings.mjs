@@ -17,6 +17,8 @@ const { create, act } = req("react-test-renderer");
 
 const sent = [];
 const listeners = [];
+const otherListeners = new Map();
+const anchorClicks = [];
 const fakeParent = {
   postMessage(msg) { sent.push(msg); },
 };
@@ -24,13 +26,22 @@ const captured = { handoff: null };
 const fakeWindow = {
   __ModuleLoader__: { load(h) { captured.handoff = h; } },
   parent: fakeParent,
-  addEventListener(type, fn) { if (type === "message") listeners.push(fn); },
+  addEventListener(type, fn) {
+    if (type === "message") listeners.push(fn);
+    else otherListeners.set(type, fn);
+  },
   removeEventListener() {},
   setInterval: () => 0,
   clearInterval: () => {},
   // WebView2 里 window.confirm 是函数但静默返回 false（默认脚本对话框只支持
   // alert）——「立即更新」不得依赖它，点击必须直接发送 apply-update。
   confirm: () => false,
+  // 供会话日志导出接管测试包装的原生锚点 click。
+  HTMLAnchorElement: {
+    prototype: {
+      click() { anchorClicks.push(this); },
+    },
+  },
 };
 new Function("window", clientJs)(fakeWindow);
 
@@ -66,7 +77,8 @@ const hello = {
   type: "hello",
   settings: {
     port: 3080, registry: "https://registry.npmjs.org", autostart: false,
-    autoRestart: true, workspaceDir: null, nodeDir: null, petEnabled: true,
+    autoRestart: true, workspaceDir: null, nodeDir: "C:\\tools\\node", petEnabled: true,
+    downloadDir: "D:\\Downloads\\dsh",
   },
   status: { phase: "running", url: "http://127.0.0.1:3080", pid: 1234 },
   versions: {
@@ -97,6 +109,23 @@ assert.ok(t2.includes("版本信息"), "应渲染版本信息区块");
 assert.ok(t2.includes("DSH：") && t2.includes("0.2.1"), "应显示 DSH 版本");
 assert.ok(t2.includes("鲸仔：") && t2.includes("0.2.0（测试版）"), "应显示鲸仔版本与测试标记");
 assert.ok(t2.includes("检查更新"), "应渲染检查更新按钮");
+assert.ok(
+  // text() 是 JSON 序列化，路径反斜杠以 \\ 形式出现。
+  t2.includes("Node 安装目录：") && t2.includes("C:\\\\tools\\\\node"),
+  "Node 安装目录应只读展示自动检测结果",
+);
+assert.equal(
+  renderer.root.findAll((n) => n.type === "input" && n.props.placeholder === "留空自动检测").length,
+  0,
+  "Node 安装目录不应再提供手动输入",
+);
+assert.ok(t2.includes("DSH 服务器的工作目录"), "工作目录应带说明文案");
+assert.ok(t2.includes("会话日志等下载的保存位置"), "下载目录应带说明文案");
+assert.equal(
+  renderer.root.findAll((n) => n.type === "button" && n.props.children === "选择…").length,
+  2,
+  "工作目录与下载目录应各带一个选择按钮",
+);
 console.log("ok: 握手后表单完整渲染（含版本信息）");
 assert.ok(sent.some((m) => m.type === "ping"), "挂载时应发送 ping");
 console.log("ok: 挂载发送 ping");
@@ -243,6 +272,57 @@ assert.ok(
 );
 console.log("ok: GitHub 按钮");
 
+// 内嵌右键接管：contextmenu 被 preventDefault（屏蔽 WebView2 默认菜单）并上报
+// 坐标 → 鲸仔主窗口弹「刷新页面 / 重启服务器」；点击/滚轮/Escape 发送关闭动作。
+const contextListener = otherListeners.get("contextmenu");
+assert.ok(contextListener, "内嵌时应注册 contextmenu 接管");
+const closeOnClick = otherListeners.get("click");
+const closeOnKey = otherListeners.get("keydown");
+let prevented = 0;
+contextListener({ clientX: 120, clientY: 90, preventDefault: () => { prevented += 1; } });
+assert.equal(prevented, 1, "应屏蔽默认右键菜单");
+assert.ok(
+  sent.some((m) => m.action === "context-menu" && m.x === 120 && m.y === 90),
+  "应上报右键点击位置",
+);
+closeOnClick();
+assert.equal(
+  sent.filter((m) => m.action === "context-menu-close").length,
+  1,
+  "点击应发送关闭菜单",
+);
+closeOnKey({ key: "Escape" });
+assert.equal(
+  sent.filter((m) => m.action === "context-menu-close").length,
+  1,
+  "菜单未打开时不应重复发送关闭",
+);
+console.log("ok: 内嵌右键菜单接管（context-menu / context-menu-close）");
+
+// 会话日志导出下载接管：导出锚点被拦截并上报 whalito-download（不触发原生
+// 下载），普通锚点仍走原生 click。
+const exportAnchor = {
+  href: "http://127.0.0.1:3080/api/session.export?sessionId=a&includeDescendants=true",
+  download: "dsh-session-a.zip",
+};
+fakeWindow.HTMLAnchorElement.prototype.click.call(exportAnchor);
+assert.ok(
+  sent.some(
+    (m) =>
+      m.action === "whalito-download" &&
+      m.url === exportAnchor.href &&
+      m.filename === "dsh-session-a.zip",
+  ),
+  "导出锚点应上报 whalito-download（url + filename）",
+);
+assert.equal(anchorClicks.length, 0, "导出锚点不应触发原生下载");
+fakeWindow.HTMLAnchorElement.prototype.click.call({
+  href: "https://example.com/x.zip",
+  download: "x.zip",
+});
+assert.equal(anchorClicks.length, 1, "普通锚点应走原生 click");
+console.log("ok: 会话日志导出下载接管（whalito-download）");
+
 // 编辑端口 + 保存
 const rootNode = renderer.root;
 const numberInput = rootNode.findAll(
@@ -259,7 +339,54 @@ assert.ok(saveMsg, "保存应发送 save-settings");
 assert.equal(saveMsg.value.port, 8123);
 assert.equal(saveMsg.value.autoRestart, true);
 assert.equal(saveMsg.value.petEnabled, true);
+assert.equal(saveMsg.value.downloadDir, "D:\\Downloads\\dsh");
+assert.equal(saveMsg.value.nodeDir, "C:\\tools\\node", "自动检测的 Node 目录应原样透传");
 console.log("ok: 保存动作消息正确:", JSON.stringify(saveMsg.value));
+
+// 下载目录清空 → 保存为 null（回退系统下载目录）
+const downloadInput = rootNode.findAll(
+  (n) =>
+    n.type === "input" &&
+    n.props.placeholder === "留空使用系统下载目录",
+)[0];
+act(() => downloadInput.props.onInput({ target: { value: "" } }));
+act(() => saveBtn.props.onClick());
+const emptiedSave = sent.filter((m) => m.action === "save-settings").pop();
+assert.equal(emptiedSave.value.downloadDir, null, "空下载目录应保存为 null");
+console.log("ok: 下载目录空值归一化");
+
+// 目录选择按钮：请求 pick-directory → 父窗口回传 picked-dir → 草稿回填并保存
+const pickBtn = rootNode.findAll(
+  (n) => n.type === "button" && n.props.children === "选择…",
+)[1];
+act(() => pickBtn.props.onClick());
+assert.ok(
+  sent.some((m) => m.action === "pick-directory" && m.field === "downloadDir"),
+  "下载目录选择按钮应发送 pick-directory",
+);
+act(() => {
+  listeners.forEach((fn) =>
+    fn({
+      data: {
+        channel: "whalito",
+        type: "picked-dir",
+        field: "downloadDir",
+        path: "E:\\picked\\downloads",
+      },
+      source: fakeParent,
+    }),
+  );
+});
+const pickedInput = rootNode.findAll(
+  (n) =>
+    n.type === "input" &&
+    n.props.placeholder === "留空使用系统下载目录",
+)[0];
+assert.equal(pickedInput.props.value, "E:\\picked\\downloads", "选择结果应回填下载目录草稿");
+act(() => saveBtn.props.onClick());
+const pickedSave = sent.filter((m) => m.action === "save-settings").pop();
+assert.equal(pickedSave.value.downloadDir, "E:\\picked\\downloads");
+console.log("ok: 目录选择回填（pick-directory → picked-dir）");
 
 // 非法端口：本地校验拦截，不发消息
 act(() => numberInput.props.onInput({ target: { value: "99999" } }));

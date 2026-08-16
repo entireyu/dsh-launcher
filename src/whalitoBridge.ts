@@ -9,6 +9,8 @@ export interface WhalitoSettings {
   autoRestart: boolean;
   workspaceDir: string | null;
   nodeDir: string | null;
+  /** DSH 会话日志导出等下载的保存目录；空 = 系统下载目录。 */
+  downloadDir: string | null;
   petEnabled: boolean;
 }
 
@@ -51,6 +53,15 @@ export interface WhalitoMessage {
   versions?: VersionsSnapshot;
   target?: string;
   url?: unknown;
+  /** 右键菜单请求的点击位置（相对内嵌页面视口）。 */
+  x?: number;
+  y?: number;
+  /** 会话日志导出下载的建议文件名。 */
+  filename?: string;
+  /** 目录选择请求的目标字段（workspaceDir / downloadDir）。 */
+  field?: string;
+  /** 目录选择结果（picked-dir 下行消息）。 */
+  path?: unknown;
 }
 
 /** 当前 DSH 服务源（用于校验 iframe 消息的 event.origin）。 */

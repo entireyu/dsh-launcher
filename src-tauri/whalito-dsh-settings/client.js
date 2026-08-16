@@ -4,6 +4,11 @@
 // 与鲸仔主窗口通过 postMessage 通信（channel: 'whalito'）：
 //   上行 { channel:'whalito', type:'ping' | 'action', action, value }
 //   下行 { channel:'whalito', type:'hello' | 'settings' | 'status' | 'error', settings, status, message }
+// 内嵌时接管页面右键：contextmenu 被 preventDefault（屏蔽 WebView2 默认菜单），
+// 上行 context-menu(x,y) 通知鲸仔主窗口弹出「刷新页面 / 重启服务器」菜单，
+// 点击/滚轮/Escape 上行 context-menu-close 关闭它。
+// 内嵌时接管会话日志导出：包装 HTMLAnchorElement.prototype.click，导出锚点
+// 上行 whalito-download(url, filename)，由鲸仔下载到配置目录并提示。
 // 非鲸仔环境（普通浏览器，window.parent === window）不注册分区。
 //
 // 注意：jsx(type, config, maybeKey) 的第三个位置参数是 key 而不是 children，
@@ -52,6 +57,63 @@
         var msg = { channel: CHANNEL, type: 'action', action: action };
         if (extra) Object.assign(msg, extra);
         postToParent(msg);
+      }
+
+      // 内嵌鲸仔时接管右键：屏蔽 WebView2 默认菜单，改为让鲸仔主窗口在
+      // 点击位置弹出「刷新页面 / 重启服务器」自定义菜单。普通浏览器打开
+      // （window.parent === window）不接管，保留浏览器原生右键菜单。
+      if (window.parent !== window) {
+        var contextMenuOpen = false;
+        window.addEventListener('contextmenu', function (e) {
+          e.preventDefault();
+          contextMenuOpen = true;
+          postToParent({
+            channel: CHANNEL,
+            type: 'action',
+            action: 'context-menu',
+            x: e.clientX,
+            y: e.clientY,
+          });
+        });
+        function closeContextMenu() {
+          if (!contextMenuOpen) return;
+          contextMenuOpen = false;
+          postToParent({ channel: CHANNEL, type: 'action', action: 'context-menu-close' });
+        }
+        // 点击（捕获阶段）/滚轮/Escape 都视为关闭菜单的意图。
+        window.addEventListener('click', closeContextMenu, true);
+        window.addEventListener('wheel', closeContextMenu, true);
+        window.addEventListener('keydown', function (e) {
+          if (e.key === 'Escape') closeContextMenu();
+        });
+      }
+
+      // 接管 DSH 会话日志导出下载：DSH 用程序化 anchor.click() 触发浏览器
+      // 下载，合成 click 事件不经过 document，只能包装原型方法。href 指向
+      // /api/session.export 时阻止默认下载，改由鲸仔下载到配置目录并提示。
+      if (
+        window.parent !== window &&
+        window.HTMLAnchorElement &&
+        window.HTMLAnchorElement.prototype
+      ) {
+        var origAnchorClick = window.HTMLAnchorElement.prototype.click;
+        window.HTMLAnchorElement.prototype.click = function () {
+          var href = typeof this.href === 'string' ? this.href : '';
+          if (href.indexOf('/api/session.export') !== -1) {
+            postToParent({
+              channel: CHANNEL,
+              type: 'action',
+              action: 'whalito-download',
+              url: href,
+              filename:
+                typeof this.download === 'string' && this.download !== ''
+                  ? this.download
+                  : '',
+            });
+            return;
+          }
+          return origAnchorClick.call(this);
+        };
       }
 
       // ---- 内联样式（中性色 + currentColor，适配明暗主题） ----
@@ -127,6 +189,10 @@
         cursor: 'pointer',
       };
       var presetActiveStyle = Object.assign({}, presetStyle, { borderColor: '#4f8cff', color: '#4f8cff' });
+      // 目录行：输入框占满剩余宽度，选择按钮不收缩不换行。
+      var pickRowStyle = { display: 'flex', gap: '8px', alignItems: 'center' };
+      var pickInputStyle = Object.assign({}, styles.input, { flex: 1, minWidth: 0 });
+      var pickButtonStyle = Object.assign({}, presetStyle, { flexShrink: 0, whiteSpace: 'nowrap' });
 
       // 鲸仔应用 logo（64x64 PNG 的 data URI，由打包时注入；展示 32px 即 2x 密度）。
       var APP_ICON_SRC = 'data:image/png;base64,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';
@@ -159,6 +225,14 @@
         var versions = React.useState(null);
         var checking = React.useState('');
         var updateStage = React.useState('');
+        // 消息监听器挂在只跑一次的 useEffect 里，闭包会捕获挂载时的 state 数组
+        // （值恒为初始值）；用 ref 在每次渲染时刷新最新快照供监听器读取。
+        var draftRef = React.useRef(null);
+        draftRef.current = draft[0];
+        var settingsRef = React.useRef(null);
+        settingsRef.current = settings[0];
+        var dirtyRef = React.useRef(false);
+        dirtyRef.current = dirty[0];
 
         React.useEffect(function () {
           var done = false;
@@ -171,7 +245,7 @@
             if (data.type === 'hello' || data.type === 'settings') {
               if (data.settings) {
                 settings[1](data.settings);
-                if (!dirty[0]) draft[1](cloneSettings(data.settings));
+                if (!dirtyRef.current) draft[1](cloneSettings(data.settings));
               }
               if (data.status) status[1](data.status);
               if (data.versions) versions[1](data.versions);
@@ -185,6 +259,19 @@
             } else if (data.type === 'versions') {
               if (data.versions) versions[1](data.versions);
               checking[1]('');
+            } else if (data.type === 'picked-dir') {
+              // 原生目录选择结果：写入草稿并标记脏（即使此前已编辑过）。
+              if (typeof data.path === 'string' && data.field === 'workspaceDir') {
+                var wsNext = Object.assign({}, draftRef.current || settingsRef.current || {});
+                wsNext.workspaceDir = data.path;
+                draft[1](wsNext);
+                dirty[1](true);
+              } else if (typeof data.path === 'string' && data.field === 'downloadDir') {
+                var dlNext = Object.assign({}, draftRef.current || settingsRef.current || {});
+                dlNext.downloadDir = data.path;
+                draft[1](dlNext);
+                dirty[1](true);
+              }
             } else if (data.type === 'update-progress') {
               updateStage[1](typeof data.message === 'string' ? data.message : '');
             } else if (data.type === 'error') {
@@ -213,6 +300,11 @@
           dirty[1](true);
         }
 
+        // 请求鲸仔主窗口弹原生目录选择器，结果经 picked-dir 消息回填草稿。
+        function pickDir(field) {
+          sendAction('pick-directory', { field: field });
+        }
+
         function buildValue(base) {
           return {
             port: Number(base.port),
@@ -221,6 +313,7 @@
             autoRestart: !!base.autoRestart,
             workspaceDir: base.workspaceDir == null || base.workspaceDir === '' ? null : base.workspaceDir,
             nodeDir: base.nodeDir == null || base.nodeDir === '' ? null : base.nodeDir,
+            downloadDir: base.downloadDir == null || base.downloadDir === '' ? null : base.downloadDir,
             petEnabled: !!base.petEnabled,
           };
         }
@@ -416,23 +509,50 @@
           ]),
           h('label', { key: 'workspace', style: styles.field }, [
             h('span', { key: 'workspace-label', style: styles.label }, '工作目录（可选）'),
-            h('input', {
-              key: 'workspace-input',
-              type: 'text', style: styles.input,
-              placeholder: '留空使用默认目录',
-              value: d.workspaceDir == null ? '' : d.workspaceDir,
-              onInput: function (e) { updateDraft('workspaceDir', e.target.value); },
-            }),
+            h('div', { key: 'workspace-row', style: pickRowStyle }, [
+              h('input', {
+                key: 'workspace-input',
+                type: 'text', style: pickInputStyle,
+                placeholder: '留空使用默认目录',
+                value: d.workspaceDir == null ? '' : d.workspaceDir,
+                onInput: function (e) { updateDraft('workspaceDir', e.target.value); },
+              }),
+              h('button', {
+                key: 'workspace-pick',
+                type: 'button',
+                style: pickButtonStyle,
+                onClick: function () { pickDir('workspaceDir'); },
+              }, '选择…'),
+            ]),
+            h('span', { key: 'workspace-hint', style: styles.hint },
+              'DSH 服务器的工作目录，会话里终端等相对路径以此为基准；留空使用默认目录。'),
           ]),
-          h('label', { key: 'node-dir', style: styles.field }, [
-            h('span', { key: 'node-dir-label', style: styles.label }, 'Node 安装目录（可选）'),
-            h('input', {
-              key: 'node-dir-input',
-              type: 'text', style: styles.input,
-              placeholder: '留空自动检测',
-              value: d.nodeDir == null ? '' : d.nodeDir,
-              onInput: function (e) { updateDraft('nodeDir', e.target.value); },
-            }),
+          d.nodeDir
+            ? h('div', { key: 'node-dir-info', style: styles.statusRow }, [
+                h('span', { key: 'node-dir-info-label', style: { fontWeight: 600 } }, 'Node 安装目录：'),
+                h('span', { key: 'node-dir-info-path', style: styles.hint },
+                  d.nodeDir + '（鲸仔自动检测或安装时写入）'),
+              ])
+            : null,
+          h('label', { key: 'download-dir', style: styles.field }, [
+            h('span', { key: 'download-dir-label', style: styles.label }, '下载目录（可选）'),
+            h('div', { key: 'download-dir-row', style: pickRowStyle }, [
+              h('input', {
+                key: 'download-dir-input',
+                type: 'text', style: pickInputStyle,
+                placeholder: '留空使用系统下载目录',
+                value: d.downloadDir == null ? '' : d.downloadDir,
+                onInput: function (e) { updateDraft('downloadDir', e.target.value); },
+              }),
+              h('button', {
+                key: 'download-dir-pick',
+                type: 'button',
+                style: pickButtonStyle,
+                onClick: function () { pickDir('downloadDir'); },
+              }, '选择…'),
+            ]),
+            h('span', { key: 'download-dir-hint', style: styles.hint },
+              '会话日志等下载的保存位置；留空使用系统下载目录。'),
           ]),
           h('label', { key: 'autostart', style: styles.check }, [
             h('input', {

@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Emitter, State};
+#[cfg(windows)]
+use tauri::Manager;
 
 use crate::state::{self, AppState, EnvInfo, ServerStatus, Settings};
 
@@ -386,6 +388,20 @@ pub async fn pick_node_dir(app: AppHandle) -> Result<Option<String>, String> {
     .map_err(|e| e.to_string())
 }
 
+/// 通用目录选择器（工作目录 / 下载目录等）。取消返回 None。
+#[tauri::command]
+pub async fn pick_directory(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .blocking_pick_folder()
+            .and_then(|fp| fp.into_path().ok().map(|p| p.to_string_lossy().to_string()))
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 fn install_dsh_inner(app: &AppHandle, shared: &Shared, spec: &str) -> Result<EnvInfo, String> {
     let node_dir = shared.node_dir();
     let env = state::detect_env(node_dir.as_deref());
@@ -567,6 +583,15 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
     // 子进程能找到 git 等常用工具；其他平台保持默认继承。
     if let Some(p) = state::effective_path() {
         cmd.env("PATH", p);
+    }
+    // 预留：把鲸仔主窗口句柄注入 DSH 子进程（DSH_DIALOG_OWNER_HWND）。
+    // 不改动 DSH 源码；当前 DSH 版本忽略该变量，未来其原生目录选择器
+    // 支持 owner 窗口后即可挂在鲸仔窗口下（任务栏图标跟随鲸仔）。
+    #[cfg(windows)]
+    if let Some(window) = app.get_webview_window("main") {
+        if let Ok(hwnd) = window.hwnd() {
+            cmd.env("DSH_DIALOG_OWNER_HWND", (hwnd.0 as usize).to_string());
+        }
     }
     cmd.arg(bin.to_string_lossy().to_string())
         .arg("web")
@@ -822,4 +847,196 @@ pub fn open_url(url: String) -> Result<(), String> {
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 净化下载文件名：剔除路径分隔符、Windows 非法字符与控制字符，空名回退。
+pub fn sanitize_filename(name: &str) -> String {
+    let cleaned: String = name
+        .trim()
+        .chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches('.');
+    if cleaned.is_empty() || cleaned == ".." {
+        "session-log.zip".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+/// 目标路径去重：同名文件存在时递增为 `name (1).ext`，不覆盖既有文件。
+pub fn unique_target(dir: &Path, filename: &str) -> PathBuf {
+    let candidate = dir.join(filename);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("download");
+    let ext = Path::new(filename)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+    for n in 1..=9999 {
+        let candidate = dir.join(format!("{stem} ({n}){ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    dir.join(filename)
+}
+
+/// 下载 URL 白名单：仅接受本机 DSH 服务器（回环地址）的 `/api/session.export`。
+/// `base` 为记录的服务器地址；外部复用的服务器不会留下记录，此时回退到
+/// 配置端口上的两种回环写法，避免合法导出被拒。
+pub fn is_allowed_download_url(url: &str, base: Option<&str>, port: u16) -> bool {
+    let matches = |candidate: &str| {
+        let candidate = candidate.trim_end_matches('/');
+        url.starts_with(candidate) && url[candidate.len()..].starts_with("/api/session.export")
+    };
+    if let Some(base) = base.filter(|b| {
+        b.starts_with("http://127.0.0.1:") || b.starts_with("http://localhost:")
+    }) {
+        if matches(base) {
+            return true;
+        }
+    }
+    matches(&format!("http://127.0.0.1:{port}")) || matches(&format!("http://localhost:{port}"))
+}
+
+/// 把 DSH 会话日志导出下载到配置目录（设置里的下载目录，留空回退系统下载目录）。
+/// 返回最终保存路径；前端据此弹提示并可「打开所在文件夹」。
+#[tauri::command]
+pub async fn whalito_download(
+    st: State<'_, AppState>,
+    url: String,
+    filename: String,
+) -> Result<String, String> {
+    let settings = st.settings.lock().unwrap().clone();
+    let base = st.server_url.lock().unwrap().clone();
+    if !is_allowed_download_url(&url, base.as_deref(), settings.port) {
+        return Err("仅允许下载本机 DSH 服务器导出的会话日志".to_string());
+    }
+    let dir = state::resolve_downloads_dir(&settings)?;
+    let filename = sanitize_filename(&filename);
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        // 同目录临时文件，下载完成后原子改名到唯一目标名。
+        let temp = dir.join(format!(".dsh-download-{filename}.part"));
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(600))
+            .build();
+        let resp = agent
+            .get(&url)
+            .set("User-Agent", "whalito-download")
+            .call()
+            .map_err(|e| format!("下载会话日志失败：{e}"))?;
+        let mut reader = resp.into_reader();
+        let mut file = std::fs::File::create(&temp).map_err(|e| format!("创建临时文件失败：{e}"))?;
+        if let Err(e) = std::io::copy(&mut reader, &mut file) {
+            drop(file);
+            let _ = std::fs::remove_file(&temp);
+            return Err(format!("写入失败：{e}"));
+        }
+        drop(file);
+        let target = unique_target(&dir, &filename);
+        std::fs::rename(&temp, &target).map_err(|e| {
+            let _ = std::fs::remove_file(&temp);
+            format!("保存到 {} 失败：{e}", dir.display())
+        })?;
+        Ok(target.display().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 在系统文件管理器里定位文件（Windows：资源管理器选中；macOS：访达揭示）。
+#[tauri::command]
+pub fn reveal_in_folder(path: String) -> Result<(), String> {
+    let p = Path::new(&path);
+    if !p.is_file() {
+        return Err("文件不存在".to_string());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("explorer")
+            .raw_arg(format!("/select,{}", p.display()))
+            .spawn()
+            .map_err(|e| format!("打开资源管理器失败：{e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open")
+        .args(["-R", &path])
+        .spawn()
+        .map_err(|e| format!("打开访达失败：{e}"))?;
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    return Err("当前平台暂不支持定位文件".to_string());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_filename_strips_hostile_chars() {
+        assert_eq!(sanitize_filename("dsh-session-a1_b-2.zip"), "dsh-session-a1_b-2.zip");
+        assert_eq!(sanitize_filename("..\\..\\evil.zip"), "evil.zip");
+        assert_eq!(sanitize_filename("a/b:c*d?.zip"), "abcd.zip");
+        assert_eq!(sanitize_filename("   "), "session-log.zip");
+        assert_eq!(sanitize_filename("..."), "session-log.zip");
+    }
+
+    #[test]
+    fn unique_target_appends_counter_without_overwriting() {
+        let dir = std::env::temp_dir().join(format!("whalito-dl-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("log.zip"), b"first").unwrap();
+        let second = unique_target(&dir, "log.zip");
+        assert_eq!(second.file_name().unwrap().to_str(), Some("log (1).zip"));
+        assert!(!second.exists());
+        std::fs::write(&second, b"second").unwrap();
+        let third = unique_target(&dir, "log.zip");
+        assert_eq!(third.file_name().unwrap().to_str(), Some("log (2).zip"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn download_url_allowlist_only_accepts_loopback_export() {
+        let base = Some("http://127.0.0.1:3080");
+        assert!(is_allowed_download_url(
+            "http://127.0.0.1:3080/api/session.export?sessionId=a&includeDescendants=true",
+            base,
+            3080,
+        ));
+        assert!(is_allowed_download_url("http://localhost:3080/api/session.export?sessionId=a", Some("http://localhost:3080"), 3080));
+        assert!(!is_allowed_download_url("http://127.0.0.1:3080/api/other", base, 3080));
+        assert!(!is_allowed_download_url("http://evil.example/api/session.export", base, 3080));
+        assert!(!is_allowed_download_url("https://127.0.0.1:3080/api/session.export", base, 3080));
+        assert!(!is_allowed_download_url("http://127.0.0.1:3081/api/session.export", base, 3080));
+    }
+
+    #[test]
+    fn download_url_allowlist_falls_back_to_configured_port_without_recorded_url() {
+        // 外部复用的服务器没有记录地址：按配置端口 + 回环地址放行。
+        assert!(is_allowed_download_url(
+            "http://127.0.0.1:30080/api/session.export?sessionId=a",
+            None,
+            30080,
+        ));
+        assert!(is_allowed_download_url(
+            "http://localhost:30080/api/session.export?sessionId=a",
+            None,
+            30080,
+        ));
+        assert!(!is_allowed_download_url("http://127.0.0.1:3080/api/session.export", None, 30080));
+        assert!(!is_allowed_download_url("http://evil.example/api/session.export", None, 30080));
+    }
 }

@@ -59,6 +59,8 @@ pub struct Settings {
     /// 是否显示桌宠（托盘可切换）。
     #[serde(default = "default_pet_enabled")]
     pub pet_enabled: bool,
+    /// DSH 会话导出等下载的保存目录；留空回退系统下载目录。
+    pub download_dir: Option<String>,
 }
 
 fn default_pet_enabled() -> bool {
@@ -75,8 +77,25 @@ impl Default for Settings {
             workspace_dir: None,
             node_dir: None,
             pet_enabled: true,
+            download_dir: None,
         }
     }
+}
+
+/// 解析下载目录：设置里的自定义目录（非空）优先，否则系统下载目录，
+/// 再否则用户主目录。目录会按需创建，创建失败时返回错误。
+pub fn resolve_downloads_dir(settings: &Settings) -> Result<std::path::PathBuf, String> {
+    let dir = settings
+        .download_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(dirs::download_dir)
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| "无法确定下载目录".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建下载目录 {}：{e}", dir.display()))?;
+    Ok(dir)
 }
 
 #[derive(Serialize, Clone)]

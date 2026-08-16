@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { dshOrigin, isWhalitoMessage, postToDsh, toPlain } from "./whalitoBridge";
@@ -37,6 +37,7 @@ interface Settings {
   autoRestart: boolean;
   workspaceDir: string | null;
   nodeDir: string | null;
+  downloadDir: string | null;
   petEnabled: boolean;
 }
 
@@ -53,6 +54,13 @@ const showSettings = ref(false);
 const confirmingStop = ref(false);
 const autoRestartCount = ref(0);
 const MAX_AUTO_RESTART = 3;
+
+// 内嵌 DSH 页面右键自定义菜单（刷新页面 / 重启服务器 / 显示隐藏桌宠）的位置；null = 关闭。
+const ctxMenu = ref<{ x: number; y: number } | null>(null);
+
+// 下载完成提示（会话日志导出等）：保存路径 + 自动消失计时器。
+const toast = ref<{ text: string; path: string } | null>(null);
+let toastTimer: number | undefined;
 
 const installingNode = ref(false);
 const installingDsh = ref(false);
@@ -268,6 +276,67 @@ async function restartServer() {
   if (r) server.value = r;
 }
 
+// ============ 内嵌 DSH 页面右键菜单 ============
+/** 刷新页面：重新挂载 iframe（key 变化触发重建，等同浏览器刷新 DSH 页面）。 */
+function ctxReload() {
+  ctxMenu.value = null;
+  embedNonce.value += 1;
+}
+
+/** 重启服务器：与设置分区里的「重启服务器」动作一致。 */
+async function ctxRestart() {
+  ctxMenu.value = null;
+  await restartServer();
+  embedNonce.value += 1;
+  pushSnapshot();
+}
+
+/** 显示/隐藏桌宠：与托盘菜单一致——由 Rust 按真实状态翻转，前端只同步结果。 */
+async function ctxTogglePet() {
+  ctxMenu.value = null;
+  const r = await wrap("正在更新桌宠…", () => invoke<boolean>("pet_toggle"));
+  if (r !== undefined) {
+    if (settings.value) settings.value.petEnabled = r;
+    pushSnapshot();
+  }
+}
+
+/** 鲸仔面板自身右键不弹任何菜单（自定义菜单只服务内嵌 DSH 页面）。 */
+function onPanelContextMenu(e: MouseEvent) {
+  e.preventDefault();
+  ctxMenu.value = null;
+}
+
+// ============ 下载提示 ============
+/** 弹下载完成提示，8 秒后自动消失；重复下载重置计时。 */
+function showToast(text: string, path: string) {
+  toast.value = { text, path };
+  if (toastTimer !== undefined) window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    toast.value = null;
+  }, 8000);
+}
+
+/** 「打开所在文件夹」：在系统文件管理器里定位下载文件。 */
+async function revealDownload(path: string) {
+  await invoke("reveal_in_folder", { path }).catch((e) => {
+    notice.value = typeof e === "string" ? e : String(e);
+  });
+}
+
+/** 面板设置里的目录选择（工作目录 / 下载目录）。 */
+async function pickWorkspaceDir() {
+  if (!settings.value) return;
+  const dir = await invoke<string | null>("pick_directory");
+  if (dir) settings.value.workspaceDir = dir;
+}
+
+async function pickDownloadDir() {
+  if (!settings.value) return;
+  const dir = await invoke<string | null>("pick_directory");
+  if (dir) settings.value.downloadDir = dir;
+}
+
 async function stopServer() {
   if (server.value.phase === "external" && !confirmingStop.value) {
     confirmingStop.value = true;
@@ -454,6 +523,50 @@ async function handleWhalitoMessage(event: MessageEvent) {
       );
       return;
     }
+    if (action === "context-menu") {
+      // 仅在内嵌 DSH 页面视图弹出（面板视图不显示右键菜单），并做边缘收拢。
+      if (view.value === "embed" && typeof msg.x === "number" && typeof msg.y === "number") {
+        const menuWidth = 170;
+        const menuHeight = 130;
+        const margin = 8;
+        ctxMenu.value = {
+          x: Math.max(margin, Math.min(msg.x, window.innerWidth - menuWidth - margin)),
+          y: Math.max(margin, Math.min(msg.y, window.innerHeight - menuHeight - margin)),
+        };
+      }
+      return;
+    }
+    if (action === "context-menu-close") {
+      ctxMenu.value = null;
+      return;
+    }
+    if (action === "pick-directory") {
+      // DSH 设置分区请求原生目录选择：选完经 picked-dir 消息回填草稿。
+      const dir = await invoke<string | null>("pick_directory").catch(() => null);
+      if (dir && (msg.field === "workspaceDir" || msg.field === "downloadDir")) {
+        postToDsh(embedFrame.value, {
+          channel: "whalito",
+          type: "picked-dir",
+          field: msg.field,
+          path: dir,
+        });
+      }
+      return;
+    }
+    if (action === "whalito-download") {
+      // 会话日志导出下载：由鲸仔下载到配置目录，完成弹提示。
+      if (typeof msg.url === "string" && typeof msg.filename === "string") {
+        const path = await invoke<string>("whalito_download", {
+          url: msg.url,
+          filename: msg.filename,
+        }).catch((e) => {
+          postWhalitoError(typeof e === "string" ? e : String(e));
+          return null;
+        });
+        if (path !== null) showToast("会话日志已保存", path);
+      }
+      return;
+    }
     postWhalitoError(`未知动作：${action ?? ""}`);
   } catch (e) {
     postWhalitoError(typeof e === "string" ? e : String(e));
@@ -638,6 +751,9 @@ onMounted(async () => {
     }),
   );
   window.addEventListener("message", handleWhalitoMessage);
+  // 鲸仔面板右键不弹菜单；iframe 内的右键事件不会冒泡到这里，
+  // 所以只影响面板自身。
+  window.addEventListener("contextmenu", onPanelContextMenu);
 
   await Promise.all([loadSettings(), refreshLogs()]);
   platform.value = await invoke<string>("get_platform").catch(() => "windows");
@@ -649,9 +765,16 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener("message", handleWhalitoMessage);
+  window.removeEventListener("contextmenu", onPanelContextMenu);
+  if (toastTimer !== undefined) window.clearTimeout(toastTimer);
   unlisteners.forEach((u) => u());
   if (pollTimer) window.clearInterval(pollTimer);
   if (versionTimer) window.clearInterval(versionTimer);
+});
+
+// 离开内嵌页视图时收起右键菜单。
+watch(view, () => {
+  ctxMenu.value = null;
 });
 
 const logBox = ref<HTMLElement | null>(null);
@@ -907,11 +1030,23 @@ function autoScroll() {
             </label>
             <label>
               <span>工作目录（可选）</span>
-              <input v-model="settings.workspaceDir" type="text" placeholder="留空使用默认目录" />
+              <div class="row">
+                <input v-model="settings.workspaceDir" type="text" placeholder="留空使用默认目录" />
+                <button class="ghost" @click="pickWorkspaceDir">选择…</button>
+              </div>
+              <p class="hint">DSH 服务器的工作目录，会话里终端等相对路径以此为基准；留空使用默认目录。</p>
             </label>
             <label>
-              <span>Node 安装目录（可选）</span>
-              <input v-model="settings.nodeDir" type="text" placeholder="留空自动检测" />
+              <span>Node 安装目录</span>
+              <p class="hint">{{ settings.nodeDir || "自动检测" }}（鲸仔自动检测或安装时写入，无需手动填写）</p>
+            </label>
+            <label>
+              <span>下载目录（可选）</span>
+              <div class="row">
+                <input v-model="settings.downloadDir" type="text" placeholder="留空使用系统下载目录" />
+                <button class="ghost" @click="pickDownloadDir">选择…</button>
+              </div>
+              <p class="hint">会话日志等下载的保存位置；留空使用系统下载目录。</p>
             </label>
             <label class="check">
               <input v-model="settings.autostart" type="checkbox" @change="toggleAutostart" />
@@ -945,5 +1080,29 @@ function autoScroll() {
         </div>
       </section>
     </template>
+  </div>
+
+  <!-- 内嵌 DSH 页面右键自定义菜单（刷新页面 / 重启服务器 / 显示隐藏桌宠） -->
+  <div
+    v-if="ctxMenu"
+    class="ctx-menu"
+    :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
+    @contextmenu.prevent="ctxMenu = null"
+  >
+    <button type="button" @click="ctxReload">刷新页面</button>
+    <button type="button" @click="ctxRestart">重启服务器</button>
+    <button type="button" @click="ctxTogglePet">显示 / 隐藏桌宠</button>
+  </div>
+
+  <!-- 下载完成提示（会话日志导出等） -->
+  <div v-if="toast" class="toast">
+    <div class="toast-body">
+      <span class="toast-text">{{ toast.text }}</span>
+      <span class="toast-path" :title="toast.path">{{ toast.path }}</span>
+    </div>
+    <div class="toast-actions">
+      <button type="button" class="toast-btn" @click="revealDownload(toast.path)">打开所在文件夹</button>
+      <button type="button" class="toast-btn" @click="toast = null">✕</button>
+    </div>
   </div>
 </template>

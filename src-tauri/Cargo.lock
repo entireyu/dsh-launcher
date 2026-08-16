@@ -929,6 +929,7 @@ dependencies = [
 name = "dsh-launcher"
 version = "0.4.0"
 dependencies = [
+ "dirs",
  "serde",
  "serde_json",
  "tauri",

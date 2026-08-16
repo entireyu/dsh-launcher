@@ -119,6 +119,7 @@ pub fn run() {
             commands::install_node_nvm,
             commands::install_node_portable,
             commands::pick_node_dir,
+            commands::pick_directory,
             commands::install_dsh,
             commands::update_dsh,
             commands::verify_dsh,
@@ -132,6 +133,8 @@ pub fn run() {
             commands::save_settings,
             commands::set_autostart,
             commands::open_url,
+            commands::whalito_download,
+            commands::reveal_in_folder,
             commands::get_logs,
             settings_plugin::sync_settings_plugin,
             settings_plugin::bridge_diag,
@@ -144,6 +147,7 @@ pub fn run() {
             pet::pet_open_session,
             pet::pet_respond,
             pet::pet_set_enabled,
+            pet::pet_toggle,
             pet_style::pet_get_style,
             pet_style::pet_set_style,
             pet_style::pet_set_position,
@@ -175,6 +179,9 @@ pub fn run() {
             }
 
             // 桌宠窗口：无边框、透明、置顶、不进任务栏。
+            // 注意：Tauri 窗口默认创建即可见，这里必须显式 visible(false)，
+            // 否则 pet_enabled=false 时桌宠仍会在启动时显示（首次切换会变成
+            // "点击无反应、第二次才隐藏"的假象）。
             let pet_window = WebviewWindowBuilder::new(&handle, "pet", WebviewUrl::App("pet.html".into()))
                 .title("鲸仔")
                 .inner_size(200.0, 250.0)
@@ -184,6 +191,7 @@ pub fn run() {
                 .always_on_top(true)
                 .skip_taskbar(true)
                 .shadow(false)
+                .visible(false)
                 .build()?;
 
             // 定位：优先样式契约中的自定义位置，否则默认主屏右下角。

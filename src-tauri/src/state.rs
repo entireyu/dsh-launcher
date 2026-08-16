@@ -881,14 +881,23 @@ fn capture_shell_path() -> Option<String> {
 }
 
 /// 进程内只捕获一次（首次约 0.3–0.5s，之后即时返回）。
+/// 注意：捕获期间【不能持有锁】——capture_shell_path 会经 run_output → child_path
+/// 再次访问本缓存，持锁会导致同线程重入死锁。
 #[cfg(target_os = "macos")]
 pub fn shell_path() -> Option<String> {
     let slot = SHELL_PATH.get_or_init(|| Mutex::new(None));
-    let mut guard = slot.lock().ok()?;
-    if guard.is_none() {
-        *guard = capture_shell_path();
+    // 快速路径：缓存已就绪
+    if let Some(cached) = slot.lock().ok().and_then(|g| g.clone()) {
+        return Some(cached);
     }
-    guard.clone()
+    // 慢路径：无锁捕获，完成后回填（并发重复捕获无害，内容一致）
+    let captured = capture_shell_path();
+    if let Some(s) = captured.clone() {
+        if let Ok(mut g) = slot.lock() {
+            *g = captured;
+        }
+    }
+    captured
 }
 
 /// 启动子进程时应注入的 PATH：macOS 合并 GUI 环境 PATH 与 shell PATH
@@ -912,14 +921,15 @@ pub fn effective_path() -> Option<String> {
 }
 
 /// 所有子进程共用的 PATH：macOS 合并 GUI 进程 PATH 与「已捕获」的用户 shell PATH
-/// （未捕获时仅返回当前 PATH——捕获流程自身也会走 run_output，必须避免递归）。
+/// （未捕获时仅返回当前 PATH——捕获流程自身也会走 run_output，必须避免递归/死锁）。
+/// 用 try_lock：缓存正在被写入（捕获中）时退回当前 PATH，绝不阻塞。
 /// 供 run_output / run_streaming 统一注入；其他平台返回 None。
 pub fn child_path() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
         let cached = SHELL_PATH
             .get()
-            .and_then(|slot| slot.lock().ok())
+            .and_then(|slot| slot.try_lock().ok())
             .and_then(|g| g.clone());
         let mut parts: Vec<String> = Vec::new();
         if let Ok(p) = std::env::var("PATH") {

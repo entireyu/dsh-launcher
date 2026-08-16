@@ -21,6 +21,7 @@
 
 ### 修复
 - 修复 macOS 安装 Harness 失败（koffi 等原生依赖的安装脚本报 `node: command not found`，退出码 127）：`run_output` / `run_streaming` 统一注入「GUI PATH + 用户 shell PATH」；`detect_env` 预热 shell PATH 捕获；npm 安装命令追加 `--scripts-prepend-node-path=true`（tar 包装的 Node 不在 shell PATH 上也能被脚本找到）
+- 修复 macOS 环境检测挂起（Node 检测不到）：shell PATH 捕获期间持有互斥锁与 `child_path` 的读锁同线程重入死锁——捕获改为无锁回填，`child_path` 改用 `try_lock` 退回当前 PATH
 - 修复 macOS 编译失败：窗口透明（`transparent`）需启用 tauri `macos-private-api` feature
 
 ## [0.3.0] - 2026-08-16

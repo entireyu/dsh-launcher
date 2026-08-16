@@ -894,7 +894,7 @@ pub fn shell_path() -> Option<String> {
     let captured = capture_shell_path();
     if let Some(s) = captured.clone() {
         if let Ok(mut g) = slot.lock() {
-            *g = captured;
+            *g = Some(s);
         }
     }
     captured

@@ -187,13 +187,33 @@ pub fn run_output(program: &str, args: &[&str]) -> Result<String, String> {
 }
 
 pub fn run_streaming(app: &AppHandle, program: &str, args: &[&str]) -> Result<String, String> {
+    run_streaming_with_path(app, program, args, None)
+}
+
+/// 流式执行，可额外把某个目录置于子进程 PATH 最前。
+/// macOS 安装 npm 包时用 node 所在目录做前缀：koffi 等原生依赖的
+/// 生命周期脚本执行 `node ./cnoke.cjs`，即使 shell PATH 捕获失败 /
+/// npm flag 未生效，也一定能找到 node。
+pub fn run_streaming_with_path(
+    app: &AppHandle,
+    program: &str,
+    args: &[&str],
+    prepend_path: Option<&str>,
+) -> Result<String, String> {
     let mut cmd = Command::new(program);
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(p) = prepend_path {
+        parts.push(p.to_string());
+    }
     if let Some(p) = child_path() {
-        cmd.env("PATH", p);
+        parts.push(p);
+    }
+    if !parts.is_empty() {
+        cmd.env("PATH", parts.join(":"));
     }
     #[cfg(windows)]
     {

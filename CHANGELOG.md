@@ -20,7 +20,7 @@
 - 环境检测重构为「平台候选链 + 逐个版本探测择优」（Windows 候选与优先级不变，新增版本择优：同序候选中优先选用版本达标的）；`pick_asset` 参数化为 `pick_asset_for`（按平台选资产）
 
 ### 修复
-- 修复 macOS 安装 Harness 失败（koffi 等原生依赖的安装脚本报 `node: command not found`，退出码 127）：`run_output` / `run_streaming` 统一注入「GUI PATH + 用户 shell PATH」；`detect_env` 预热 shell PATH 捕获；npm 安装命令追加 `--scripts-prepend-node-path=true`（tar 包装的 Node 不在 shell PATH 上也能被脚本找到）
+- 修复 macOS 安装 Harness 失败（koffi 等原生依赖的安装脚本报 `node: command not found`，退出码 127）：`run_output` / `run_streaming` 统一注入「GUI PATH + 用户 shell PATH」；`detect_env` 预热 shell PATH 捕获；npm 安装命令追加 `--scripts-prepend-node-path=true`，并将 node 所在目录置顶注入 npm 子进程 PATH（绝对兜底，不依赖 shell PATH 捕获与 npm flag）
 - 修复 macOS 环境检测挂起（Node 检测不到）：shell PATH 捕获期间持有互斥锁与 `child_path` 的读锁同线程重入死锁——捕获改为无锁回填，`child_path` 改用 `try_lock` 退回当前 PATH
 - 修复 macOS 编译失败：窗口透明（`transparent`）需启用 tauri `macos-private-api` feature
 

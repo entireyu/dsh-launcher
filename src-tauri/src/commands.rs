@@ -429,7 +429,12 @@ fn install_dsh_inner(app: &AppHandle, shared: &Shared, spec: &str) -> Result<Env
         &format!("[系统] 清空旧安装后开始安装 {spec} 到 {install_prefix}"),
     );
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    state::run_streaming(app, &node, &arg_refs)?;
+    // node 所在目录置顶注入 PATH：koffi 等生命周期脚本 `node ./cnoke.cjs`
+    // 必须能找到 node（macOS GUI 环境 PATH 极简，此处绝对兜底）。
+    let node_bin_dir = Path::new(&node)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string());
+    state::run_streaming_with_path(app, &node, &arg_refs, node_bin_dir.as_deref())?;
 
     let _ = app.emit("install-stage", "verify");
     state::push_log(&shared.logs, "[系统] 安装完成，正在校验");

@@ -438,6 +438,17 @@ fn install_dsh_inner(app: &AppHandle, shared: &Shared, spec: &str) -> Result<Env
 
     let _ = app.emit("install-stage", "verify");
     state::push_log(&shared.logs, "[系统] 安装完成，正在校验");
+
+    // 显式校验：detect_env 会吞掉 dsh 启动报错，这里把真实错误返回给用户
+    // （macOS 上 dsh 顶层 import 链含原生模块，--version 失败即安装不可用）
+    if let Some(bin) = state::dsh_bin(&install_prefix) {
+        let bin_s = bin.to_string_lossy().to_string();
+        if let Err(e) = state::run_output(&node, &[&bin_s, "--version"]) {
+            state::push_log(&shared.logs, &format!("[系统] Harness 校验失败：{e}"));
+            return Err(format!("Harness 已安装但校验失败：{e}"));
+        }
+    }
+
     Ok(state::detect_env(node_dir.as_deref()))
 }
 

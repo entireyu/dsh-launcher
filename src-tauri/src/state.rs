@@ -569,13 +569,27 @@ pub fn npm_cli(node_path: &str) -> Option<PathBuf> {
 }
 
 pub fn dsh_bin(npm_prefix: &str) -> Option<PathBuf> {
-    let bin = Path::new(npm_prefix)
-        .join("node_modules")
-        .join("@deepseek-ai")
-        .join("dsh")
-        .join("lib")
-        .join("bin.js");
-    bin.exists().then_some(bin)
+    // npm 全局安装布局因平台而异：Windows 是 <prefix>/node_modules，
+    // POSIX（macOS/Linux）是 <prefix>/lib/node_modules——两种都探测。
+    let root = Path::new(npm_prefix);
+    for candidate in [
+        root.join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh")
+            .join("lib")
+            .join("bin.js"),
+        root.join("lib")
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh")
+            .join("lib")
+            .join("bin.js"),
+    ] {
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// 应用专用 npm 安装前缀（用户目录内，隔离且免管理员权限）。
@@ -1025,5 +1039,45 @@ mod tests {
     #[test]
     fn picks_none_for_empty_candidates() {
         assert!(pick_best_node(&[]).is_none());
+    }
+
+    #[test]
+    fn dsh_bin_finds_both_npm_layouts() {
+        let base = std::env::temp_dir().join(format!("whalito-dshbin-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // Windows 布局：<prefix>/node_modules/...
+        let win = base.join("win");
+        let win_bin = win
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh")
+            .join("lib")
+            .join("bin.js");
+        std::fs::create_dir_all(win_bin.parent().unwrap()).unwrap();
+        std::fs::write(&win_bin, "x").unwrap();
+        assert_eq!(
+            dsh_bin(win.to_str().unwrap()).map(|p| p.to_string_lossy().to_string()),
+            Some(win_bin.to_string_lossy().to_string())
+        );
+        // POSIX 布局：<prefix>/lib/node_modules/...
+        let posix = base.join("posix");
+        let posix_bin = posix
+            .join("lib")
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh")
+            .join("lib")
+            .join("bin.js");
+        std::fs::create_dir_all(posix_bin.parent().unwrap()).unwrap();
+        std::fs::write(&posix_bin, "x").unwrap();
+        assert_eq!(
+            dsh_bin(posix.to_str().unwrap()).map(|p| p.to_string_lossy().to_string()),
+            Some(posix_bin.to_string_lossy().to_string())
+        );
+        // 空目录：找不到
+        let empty = base.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(dsh_bin(empty.to_str().unwrap()).is_none());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

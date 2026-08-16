@@ -1,10 +1,9 @@
 name: Release
 
 on:
+  # 仅 tag 推送自动触发（发布 Release）；分支推送不再触发构建，
+  # 需要产物验证时手动触发（仅构建并上传产物，不创建 Release）。
   push:
-    branches:
-      - "main"
-      - "yu_*"
     tags:
       - "v*"
   workflow_dispatch:

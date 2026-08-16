@@ -4,6 +4,11 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 变更
+- Release workflow 仅由 `v*` tag 自动触发；分支推送不再触发构建（需要产物验证时手动触发，仅构建上传、不创建 Release）
+
 ## [0.4.1] - 2026-08-16
 
 ### 优化

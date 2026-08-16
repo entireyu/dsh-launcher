@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-16
+
 ### 新增
 - macOS 版本（universal，Apple Silicon / Intel 通用）：
   - 环境检测适配 macOS：按优先级探测 自定义/便携目录 → nvm（`~/.nvm`，含 current 软链与版本目录）→ fnm/volta → Homebrew（`/opt/homebrew`、`/usr/local`）→ 系统 node → PATH；npm-cli.js 兼容 Homebrew / 官方 pkg / nvm 布局
@@ -13,8 +15,10 @@
   - macOS 启动 dsh 时注入用户 shell PATH；开机自启为用户级 LaunchAgent；停止服务器用 `kill`；按端口定位进程用 `lsof`；打开浏览器用 `open`
   - 鲸仔自动更新支持 macOS：匹配 Release 中的 `.dmg` 资产，挂载 dmg 覆盖安装并自动重启（hdiutil / ditto / xattr 去隔离）
   - 前端按平台切换安装 UI（winget 按钮仅 Windows 显示，macOS 显示 tar 包安装说明）
-- GitHub Actions Release 工作流（`.github/workflows/release.yml`）：推送 `v*` tag 自动构建 Windows NSIS 与 macOS universal dmg 并上传 GitHub Release
+- GitHub Actions Release 工作流（`.github/workflows/release.yml`）：推送 `v*` tag 自动构建 Windows NSIS 与 macOS universal dmg 并上传 GitHub Release；分支推送仅构建并上传 Artifacts
 - 修复 `whalito_apply_update` 命令未注册进 handler 的问题（此前鲸仔「立即更新」实际调用会失败）
+- 桌宠任务完成 / 被阻塞 / 被中断通知：打开主界面后清除、回到空闲态
+- 桌宠气泡贴紧鲸仔头顶，空闲时改为定时轻冒泡（不常驻对话框）
 
 ### 变更
 - 环境检测重构为「平台候选链 + 逐个版本探测择优」（Windows 候选与优先级不变，新增版本择优：同序候选中优先选用版本达标的）；`pick_asset` 参数化为 `pick_asset_for`（按平台选资产）
@@ -91,6 +95,7 @@
 - 安装 / 启动等阻塞命令改为异步，修复点击安装后界面卡死
 - 探测端口上外部已运行的 DSH 服务器，修复误报已停止
 
+[0.4.0]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.1.0...v0.1.1

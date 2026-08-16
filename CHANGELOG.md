@@ -9,6 +9,9 @@
 ### 变更
 - Release workflow 仅由 `v*` tag 自动触发；分支推送不再触发构建（需要产物验证时手动触发，仅构建上传、不创建 Release）
 
+### 修复
+- 修复 Release workflow 发布说明提取失败导致不发布：`release-notes.js` 在 `"type": "module"` 包下按 ESM 运行、`require` 不可用——改名为 `.cjs` 强制 CommonJS
+
 ## [0.4.1] - 2026-08-16
 
 ### 优化

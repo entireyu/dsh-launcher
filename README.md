@@ -51,14 +51,14 @@
 
 ### Windows
 
-1. 在 [Releases](https://github.com/entireyu/dsh-whalito-desk/releases) 下载最新安装包 `Whalito_0.4.1_x64-setup.exe`
+1. 在 [Releases](https://github.com/entireyu/dsh-whalito-desk/releases) 下载最新安装包 `Whalito_0.4.2_x64-setup.exe`
 2. 双击安装（首次运行 Windows SmartScreen 会提示「未知发布者」，点击「仍要运行」即可）
 3. 打开鲸仔，其余交给它 —— 检测、补齐、启动全程自动
 4. 关闭窗口即最小化到托盘，需要时点击托盘图标唤回
 
 ### macOS（内部测试版）
 
-1. 在 [Releases](https://github.com/entireyu/dsh-whalito-desk/releases) 下载最新 `Whalito_0.4.1_universal.dmg`
+1. 在 [Releases](https://github.com/entireyu/dsh-whalito-desk/releases) 下载最新 `Whalito_0.4.2_universal.dmg`
 2. 双击挂载，把「Whalito」拖入「应用程序」（Applications）
 3. **首次打开**：安装包为内部测试版（未签名公证），请勿直接双击图标——在 Finder 中**右键 App → 打开 → 再点「打开」**确认一次，之后即可正常双击启动
 4. 打开鲸仔，其余交给它 —— 检测、补齐、启动全程自动；关闭窗口即隐藏到托盘（菜单栏图标）
@@ -125,8 +125,8 @@ pnpm tauri dev        # 前端 dev server + Rust debug
 ### 打包
 
 ```bash
-pnpm tauri:build        # 生产包：Whalito_0.4.1_x64-setup.exe（DSH 端口 3080，数据目录 ~/.dsh）
-pnpm tauri:build:test   # 测试包：Whalito-Test_0.4.1_x64-setup.exe（DSH 端口 30080，数据目录 ~/.dsh-test）
+pnpm tauri:build        # 生产包：Whalito_0.4.2_x64-setup.exe（DSH 端口 3080，数据目录 ~/.dsh）
+pnpm tauri:build:test   # 测试包：Whalito-Test_0.4.2_x64-setup.exe（DSH 端口 30080，数据目录 ~/.dsh-test）
 ```
 
 测试包与生产包三隔离（包名/标识符、默认端口、DSH 数据目录均不同），可同时安装、同时运行、互不干扰。测试开关是编译期的 `WHALITO_TEST_BUILD=1`（见 `src-tauri/src/state.rs` 的 `TEST_BUILD`），生产构建不设置该变量，测试代码被编译器折叠、零残留。
@@ -147,7 +147,7 @@ rustup target add x86_64-apple-darwin
 pnpm tauri build --target universal-apple-darwin --config src-tauri/tauri.macos.conf.json
 ```
 
-- 打 `v*` tag 或手动触发 Release workflow → CI 同时构建 Windows NSIS 与 macOS universal dmg，并上传到 GitHub Release（资产名如 `Whalito_0.4.1_universal.dmg`）
+- 打 `v*` tag 或手动触发 Release workflow → CI 同时构建 Windows NSIS 与 macOS universal dmg，并上传到 GitHub Release（资产名如 `Whalito_0.4.2_universal.dmg`）
 - 产物为 ad-hoc 签名（内部测试分发；未公证，用户右键 → 打开）。正式对外分发需配置 Apple Developer ID 证书并启用 notarytool 公证（工作流内已预留注释位）
 - macOS 版本更新器匹配 Release 中的 `.dmg` 资产（Windows 匹配 `_x64-setup.exe`），一键更新会自动挂载 dmg 覆盖安装并重启
 

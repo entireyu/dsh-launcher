@@ -4,10 +4,17 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.4.4] - 2026-08-18
 
 ### 新增
-- 添加 MIT 许可证（`LICENSE`），并在 `package.json` / `src-tauri/Cargo.toml` / README 中标注许可信息
+- DSH 更新期间内嵌页显示「正在更新 DeepSeek Harness…」loading（含阶段文案），不再在服务器重启时误显示「服务器未运行」；鲸仔自更新前主窗口显示「鲸仔正在更新…」全屏遮罩
+
+### 变更
+- DSH 更新编排改为「停止服务器 → 更新安装 → 重新启动」，避免 Windows 下运行中的服务器锁定原生模块导致 `remove_dir_all` 半装 / 长耗时；更新结束统一刷新环境 / 服务器状态 / 版本快照并清除更新中状态
+
+### 修复
+- 修复 DSH 更新完成后鲸仔面板仍显示 loading / 旧版本 / 更新中：更新入口统一走 `performDshUpdate`，`finally` 中 `refreshEnv + refreshStatus + pushSnapshot` 并复位 `installingDsh`
+- 修复鲸仔自更新弹出 `ping 127.0.0.1` 控制台窗口：更新链由 `cmd /C "ping ... & start ..."` 改为临时 WScript 脚本（`wscript.exe`，GUI 子系统无控制台），等待/静默安装/重启全程无窗口
 
 ## [0.4.3] - 2026-08-17
 
@@ -138,6 +145,7 @@
 - 安装 / 启动等阻塞命令改为异步，修复点击安装后界面卡死
 - 探测端口上外部已运行的 DSH 服务器，修复误报已停止
 
+[0.4.4]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/entireyu/dsh-whalito-desk/compare/v0.4.0...v0.4.1

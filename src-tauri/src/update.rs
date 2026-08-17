@@ -213,7 +213,7 @@ fn download_to(url: &str, dest: &Path) -> Result<(), String> {
 }
 
 /// 启动更新链：等待旧进程退出 → 安装新版本到当前目录 → 重启应用。
-/// Windows 链由独立 cmd 进程承载（DETACHED）；macOS 链由独立 /bin/sh 脚本承载。
+/// Windows 链由独立 wscript（GUI 子系统，无控制台窗口）承载；macOS 链由独立 /bin/sh 脚本承载。
 fn spawn_update_chain(dest: &Path) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("获取当前程序路径失败：{e}"))?;
     let dir = exe
@@ -222,12 +222,18 @@ fn spawn_update_chain(dest: &Path) -> Result<(), String> {
         .unwrap_or_else(|| PathBuf::from("."));
     #[cfg(windows)]
     {
-        let chain = build_update_chain(dest, &dir, &exe);
+        let script = build_update_vbs(dest, &dir, &exe);
+        let script_path = std::env::temp_dir().join(format!(
+            "whalito-update-{}.vbs",
+            std::process::id()
+        ));
+        std::fs::write(&script_path, &script).map_err(|e| format!("写入更新脚本失败：{e}"))?;
         use std::os::windows::process::CommandExt;
-        std::process::Command::new("cmd")
-            .raw_arg("/C")
-            .raw_arg(&chain)
-            .creation_flags(0x0000_0008 | 0x0800_0000) // DETACHED_PROCESS | CREATE_NO_WINDOW
+        // wscript.exe 是 GUI 子系统进程：即使不带 CREATE_NO_WINDOW 也不会弹控制台，
+        // 保留该 flag 只是双保险。
+        std::process::Command::new("wscript.exe")
+            .arg(&script_path)
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .spawn()
             .map_err(|e| format!("启动更新进程失败：{e}"))?;
         Ok(())
@@ -283,12 +289,17 @@ pub fn build_update_script() -> String {
     .join("\n")
 }
 
-/// 组装更新链命令行（独立纯函数，便于单测）：
-/// 延迟 5 秒等应用退出 → start /wait 静默安装（/D= 必须位于末尾）→ 重启应用。
+/// 组装更新脚本（WScript，独立纯函数，便于单测）：
+/// 等待 5 秒等应用退出 → 隐藏并等待静默安装（/D= 必须位于末尾、不额外引号）→ 重启应用。
+/// wscript.exe 是 GUI 子系统进程，永不弹出控制台窗口（旧 cmd 链里的 ping 会闪出终端）。
 #[cfg_attr(not(windows), allow(dead_code))]
-pub fn build_update_chain(installer: &Path, install_dir: &Path, app_exe: &Path) -> String {
+pub fn build_update_vbs(installer: &Path, install_dir: &Path, app_exe: &Path) -> String {
+    // VBScript 字符串里双引号写成 ""；反斜杠是字面量，无需转义。
     format!(
-        "ping -n 6 127.0.0.1 >nul & start \"\" /wait \"{}\" /S /D={} & start \"\" \"{}\"",
+        "WScript.Sleep 5000\n\
+         Set sh = CreateObject(\"WScript.Shell\")\n\
+         sh.Run \"\"\"{}\"\" /S /D={}\", 0, True\n\
+         sh.Run \"\"\"{}\"\"\", 1, False\n",
         installer.display(),
         install_dir.display(),
         app_exe.display()
@@ -411,15 +422,20 @@ mod tests {
     }
 
     #[test]
-    fn update_chain_contains_installer_and_relaunch() {
-        let chain = build_update_chain(
+    fn update_script_is_windowless_and_contains_install_relaunch() {
+        let script = build_update_vbs(
             Path::new(r"C:\Temp\setup.exe"),
             Path::new(r"C:\App\whalito"),
             Path::new(r"C:\App\whalito\Whalito.exe"),
         );
-        assert!(chain.contains(r#""C:\Temp\setup.exe" /S /D=C:\App\whalito"#));
-        assert!(chain.contains(r#"start "" "C:\App\whalito\Whalito.exe""#));
-        assert!(chain.contains("ping -n 6"));
+        // 旧实现用 ping 等待会闪出控制台窗口，必须移除。
+        assert!(!script.contains("ping"));
+        assert!(script.contains("WScript.Sleep 5000"));
+        assert!(script.contains("CreateObject(\"WScript.Shell\")"));
+        // 静默安装参数：安装包路径 + /S + 末位不引号的 /D= 安装目录。
+        assert!(script.contains("/S /D=C:\\App\\whalito"));
+        assert!(script.contains("C:\\Temp\\setup.exe"));
+        assert!(script.contains("C:\\App\\whalito\\Whalito.exe"));
     }
 
     #[test]

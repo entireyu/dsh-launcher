@@ -69,6 +69,11 @@ const installingDsh = ref(false);
 const verifying = ref(false);
 const checkingUpdate = ref(false);
 const latestVersion = ref<string | null>(null);
+// DSH 更新进度文案（面板进度条 / 内嵌页更新 loading 共用）。
+const dshUpdateMessage = ref("");
+// 鲸仔自更新状态：全屏遮罩显示下载 / 安装进度，直到应用退出重启。
+const whalitoUpdating = ref(false);
+const whalitoUpdateMessage = ref("");
 
 // 视图：flow = 引导流程 / panel = 高级面板 / embed = 内嵌页面
 const view = ref<"flow" | "panel" | "embed">("flow");
@@ -236,18 +241,50 @@ async function installDsh() {
   }
 }
 
+// 统一 DSH 更新编排：停止服务器 → 更新安装 → 重新启动。
+// 必须在停止服务器之后再执行 update_dsh：Windows 下运行中的服务器会锁定
+// node_modules 里的原生模块，先删目录再重装会因文件锁导致半装/长耗时
+//（面板残留「旧版本 + 更新中」的根因）。失败抛错，由调用方 catch 兜底恢复。
+async function performDshUpdate() {
+  const wasRunning =
+    server.value.phase === "running" || server.value.phase === "external";
+  if (wasRunning) {
+    dshUpdateMessage.value = "正在停止服务器…";
+    await doStop();
+  }
+  dshUpdateMessage.value = "正在更新 DeepSeek Harness…";
+  const r = await invoke<EnvInfo>("update_dsh");
+  env.value = r;
+  await checkLatest();
+  if (wasRunning) {
+    dshUpdateMessage.value = "更新完成，正在启动服务器…";
+    await startServer();
+    embedNonce.value += 1;
+  }
+}
+
+// 更新完成后兜底：清状态并刷新环境/服务器/版本快照（失败恢复由调用方 catch 负责）。
+async function finishDshUpdate() {
+  installingDsh.value = false;
+  dshUpdateMessage.value = "";
+  await refreshEnv();
+  await refreshStatus();
+  pushSnapshot();
+}
+
 async function updateDsh() {
   installingDsh.value = true;
+  dshUpdateMessage.value = "正在更新 DeepSeek Harness…";
   try {
-    const r = await wrap("正在更新 DeepSeek Harness…", () =>
-      invoke<EnvInfo>("update_dsh"),
-    );
-    if (r) {
-      env.value = r;
-      checkLatest();
+    await performDshUpdate();
+  } catch (e) {
+    error.value = typeof e === "string" ? e : String(e);
+    // 更新失败时尽力恢复服务器，避免留下停服状态。
+    if (server.value.phase !== "running" && server.value.phase !== "external") {
+      await startServer().catch(() => {});
     }
   } finally {
-    installingDsh.value = false;
+    await finishDshUpdate();
   }
 }
 
@@ -563,33 +600,23 @@ async function processWhalitoMessage(msg: WhalitoMessage, eventOrigin: string) {
       return;
     }
     if (action === "update-dsh") {
-      // 设置页「立即更新」：按当前版本偏好安装；进度经 install-stage → update-progress 回传。
+      // 设置页「立即更新」：停止 → 更新 → 启动；进度经 install-stage → update-progress 回传。
       installingDsh.value = true;
+      dshUpdateMessage.value = "正在更新 DeepSeek Harness…";
       postToDsh(embedFrame.value, {
         channel: "whalito",
         type: "update-progress",
         message: "正在更新 DeepSeek Harness…",
       });
       try {
-        const r = await invoke<EnvInfo>("update_dsh");
-        env.value = r;
-        await checkLatest();
-        // 更新替换了 DSH 安装目录：重启服务器并重挂 iframe，让新版本立即生效
-        // （与端口变更后的自动重启流程一致）。
-        if (server.value.phase === "running" || server.value.phase === "external") {
-          postToDsh(embedFrame.value, {
-            channel: "whalito",
-            type: "update-progress",
-            message: "更新完成，正在重启服务器…",
-          });
-          await restartServer();
-          embedNonce.value += 1;
-        }
+        await performDshUpdate();
       } catch (e) {
         postWhalitoError(typeof e === "string" ? e : String(e));
+        if (server.value.phase !== "running" && server.value.phase !== "external") {
+          await startServer().catch(() => {});
+        }
       } finally {
-        installingDsh.value = false;
-        pushSnapshot();
+        await finishDshUpdate();
       }
       return;
     }
@@ -604,9 +631,13 @@ async function processWhalitoMessage(msg: WhalitoMessage, eventOrigin: string) {
     }
     if (action === "apply-update") {
       // 命令末尾会退出应用（安装链接管重启），不 await；失败时回传错误。
-      invoke("whalito_apply_update").catch((e) =>
-        postWhalitoError(typeof e === "string" ? e : String(e)),
-      );
+      // 先进入全屏「正在更新」状态，让下载/安装进度可见，消除「点了没反应」的割裂。
+      whalitoUpdating.value = true;
+      whalitoUpdateMessage.value = "正在准备更新…";
+      invoke("whalito_apply_update").catch((e) => {
+        whalitoUpdating.value = false;
+        postWhalitoError(typeof e === "string" ? e : String(e));
+      });
       return;
     }
     if (action === "context-menu") {
@@ -812,6 +843,8 @@ onMounted(async () => {
   unlisteners.push(
     await listen<string>("install-stage", (e) => {
       installStage.value = e.payload;
+      // 同步到内嵌页更新 loading 文案。
+      dshUpdateMessage.value = stageText[e.payload] ?? e.payload;
       // 安装阶段回传设置分区（update-dsh / 面板安装都可见进度）。
       postToDsh(embedFrame.value, {
         channel: "whalito",
@@ -858,6 +891,8 @@ onMounted(async () => {
   );
   unlisteners.push(
     await listen<string>("whalito-update", (e) => {
+      whalitoUpdating.value = true;
+      whalitoUpdateMessage.value = e.payload;
       postToDsh(embedFrame.value, {
         channel: "whalito",
         type: "update-progress",
@@ -903,22 +938,32 @@ function autoScroll() {
 <template>
   <!-- ============ 内嵌页面（单窗口） ============ -->
   <div v-if="view === 'embed'" class="embed">
-    <iframe
-      v-if="server.url"
-      ref="embedFrame"
-      :key="embedNonce"
-      :src="server.url"
-      class="embed-frame"
-      @load="onEmbedLoad"
-    />
-    <div v-else class="embed-empty">
-      <p>服务器未运行</p>
-      <div class="row">
-        <button class="primary" @click="startServer">启动服务器</button>
-        <button @click="goPanel">返回鲸仔助手</button>
-        <button @click="showSettings = true">打开设置</button>
+    <!-- DSH 更新中：服务器已停止、正在重装，显示更新 loading 而非「服务器未运行」 -->
+    <div v-if="installingDsh" class="embed-updating">
+      <p class="embed-updating-title">正在更新 DeepSeek Harness…</p>
+      <div class="progress-track">
+        <div class="progress-bar"></div>
       </div>
+      <p class="hint">{{ dshUpdateMessage }}</p>
     </div>
+    <template v-else>
+      <iframe
+        v-if="server.url"
+        ref="embedFrame"
+        :key="embedNonce"
+        :src="server.url"
+        class="embed-frame"
+        @load="onEmbedLoad"
+      />
+      <div v-else class="embed-empty">
+        <p>服务器未运行</p>
+        <div class="row">
+          <button class="primary" @click="startServer">启动服务器</button>
+          <button @click="goPanel">返回鲸仔助手</button>
+          <button @click="showSettings = true">打开设置</button>
+        </div>
+      </div>
+    </template>
   </div>
 
   <!-- ============ 主窗口：流程 / 面板 ============ -->
@@ -1030,6 +1075,7 @@ function autoScroll() {
 
       <div v-if="installingNode || installingDsh" class="progress-track">
         <div class="progress-bar"></div>
+        <p v-if="dshUpdateMessage" class="hint">{{ dshUpdateMessage }}</p>
       </div>
 
       <p v-if="error" class="banner error">{{ error }}</p>
@@ -1221,6 +1267,17 @@ function autoScroll() {
     <div class="toast-actions">
       <button v-if="toast.path" type="button" class="toast-btn" @click="revealDownload(toast.path)">打开所在文件夹</button>
       <button type="button" class="toast-btn" @click="toast = null">✕</button>
+    </div>
+  </div>
+
+  <!-- 鲸仔自更新全屏遮罩：下载/安装进度可见，直到应用退出并由安装链重启 -->
+  <div v-if="whalitoUpdating" class="update-overlay">
+    <div class="update-overlay-card">
+      <p class="update-overlay-title">鲸仔正在更新…</p>
+      <div class="progress-track">
+        <div class="progress-bar"></div>
+      </div>
+      <p class="update-overlay-hint">{{ whalitoUpdateMessage }}</p>
     </div>
   </div>
 </template>

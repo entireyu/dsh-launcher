@@ -33,6 +33,8 @@ interface ServerStatus {
 interface Settings {
   port: number;
   registry: string;
+  /** DSH 版本偏好："latest"（稳定版）/ "next"（预发布版）。 */
+  dshChannel: string;
   autostart: boolean;
   autoRestart: boolean;
   workspaceDir: string | null;
@@ -55,7 +57,7 @@ const confirmingStop = ref(false);
 const autoRestartCount = ref(0);
 const MAX_AUTO_RESTART = 3;
 
-// 内嵌 DSH 页面右键自定义菜单（刷新页面 / 重启服务器 / 显示隐藏桌宠）的位置；null = 关闭。
+// 内嵌 DSH 页面右键自定义菜单（复制/剪切/粘贴 ─ 刷新页面 / 重启服务器 / 显示隐藏桌宠）的位置；null = 关闭。
 const ctxMenu = ref<{ x: number; y: number } | null>(null);
 
 // 下载完成提示（会话日志导出等）：保存路径 + 自动消失计时器。
@@ -301,6 +303,35 @@ async function ctxTogglePet() {
   }
 }
 
+// ============ 内嵌页面右键剪贴板操作 ============
+// 选区/光标在内嵌 iframe（跨源），剪贴板由父窗口经 Rust 代为读写：
+// 复制 → 通知 iframe 读选区文本上行 → 写入系统剪贴板；
+// 粘贴 → 父窗口读剪贴板 → 下发文本 → iframe 在光标处插入（组件自己的粘贴管线）。
+function ctxCopy() {
+  ctxMenu.value = null;
+  diag("menu copy clicked");
+  postToDsh(embedFrame.value, { channel: "whalito", type: "action", action: "context-copy" });
+}
+
+async function ctxPaste() {
+  ctxMenu.value = null;
+  diag("menu paste clicked");
+  try {
+    const text = await invoke<string>("clipboard_read");
+    diag(`clipboard_read ok, len=${text.length}`);
+    postToDsh(embedFrame.value, {
+      channel: "whalito",
+      type: "action",
+      action: "context-paste",
+      text,
+    });
+  } catch (e) {
+    const msg = typeof e === "string" ? e : String(e);
+    diag(`clipboard_read failed: ${msg}`);
+    postWhalitoError(`读取剪贴板失败：${msg}`);
+  }
+}
+
 /** 鲸仔面板自身右键不弹任何菜单（自定义菜单只服务内嵌 DSH 页面）。 */
 function onPanelContextMenu(e: MouseEvent) {
   e.preventDefault();
@@ -308,13 +339,13 @@ function onPanelContextMenu(e: MouseEvent) {
 }
 
 // ============ 下载提示 ============
-/** 弹下载完成提示，8 秒后自动消失；重复下载重置计时。 */
-function showToast(text: string, path: string) {
+/** 弹提示，durationMs 后自动消失；重复提示重置计时。下载提示默认 8s，复制提示 2s。 */
+function showToast(text: string, path: string, durationMs = 8000) {
   toast.value = { text, path };
   if (toastTimer !== undefined) window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => {
     toast.value = null;
-  }, 8000);
+  }, durationMs);
 }
 
 /** 「打开所在文件夹」：在系统文件管理器里定位下载文件。 */
@@ -410,21 +441,41 @@ function postWhalitoError(message: string) {
   postToDsh(embedFrame.value, { channel: "whalito", type: "error", message });
 }
 
+/** 剪贴板链路诊断：写入 %TEMP%\whalito-bridge.log。 */
+function diag(line: string) {
+  invoke("bridge_diag", { line: `[clip] ${line}` }).catch(() => {});
+}
+
 function isPortValid(p: unknown): p is number {
   return typeof p === "number" && Number.isInteger(p) && p >= 1 && p <= 65535;
+}
+
+// 内嵌页消息串行队列：保存设置 / 检查更新 / 更新安装共享 latestVersion 等状态，
+// 并发交错会让旧结果覆盖新结果（如：切回稳定版后仍显示预发布版的新版本）。
+let whalitoQueue: Promise<void> = Promise.resolve();
+function enqueueWhalito<T>(fn: () => Promise<T>): Promise<T> {
+  const run = whalitoQueue.then(fn, fn);
+  whalitoQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
 }
 
 async function handleWhalitoMessage(event: MessageEvent) {
   const origin = dshOrigin(server.value.url);
   if (origin !== null && event.origin !== origin) return;
   if (!isWhalitoMessage(event.data)) return;
-  const msg: WhalitoMessage = event.data;
+  const msg = event.data;
+  await enqueueWhalito(() => processWhalitoMessage(msg, event.origin));
+}
 
+async function processWhalitoMessage(msg: WhalitoMessage, eventOrigin: string) {
   if (msg.type === "ping") {
     if (!whalitoPingLogged) {
       whalitoPingLogged = true;
       logs.value.push("[系统] 鲸仔设置分区已连接（收到内嵌页握手请求）");
-      invoke("bridge_diag", { line: `收到 ping，origin=${event.origin}` }).catch(() => {});
+      invoke("bridge_diag", { line: `收到 ping，origin=${eventOrigin}` }).catch(() => {});
     }
     pushSnapshot();
     return;
@@ -454,6 +505,10 @@ async function handleWhalitoMessage(event: MessageEvent) {
         invoke<boolean>("pet_set_enabled", { enabled: r.petEnabled }),
       );
       settings.value = await invoke<Settings>("get_settings");
+      // 保存后无条件重查版本：版本偏好/镜像源都会影响检查结果，
+      // 无条件重查 + 串行队列保证最终显示与当前设置一致（不会残留旧通道结果）。
+      latestVersion.value = null;
+      await checkLatest();
       if (
         prevPort !== undefined &&
         r.port !== prevPort &&
@@ -507,6 +562,37 @@ async function handleWhalitoMessage(event: MessageEvent) {
       pushSnapshot();
       return;
     }
+    if (action === "update-dsh") {
+      // 设置页「立即更新」：按当前版本偏好安装；进度经 install-stage → update-progress 回传。
+      installingDsh.value = true;
+      postToDsh(embedFrame.value, {
+        channel: "whalito",
+        type: "update-progress",
+        message: "正在更新 DeepSeek Harness…",
+      });
+      try {
+        const r = await invoke<EnvInfo>("update_dsh");
+        env.value = r;
+        await checkLatest();
+        // 更新替换了 DSH 安装目录：重启服务器并重挂 iframe，让新版本立即生效
+        // （与端口变更后的自动重启流程一致）。
+        if (server.value.phase === "running" || server.value.phase === "external") {
+          postToDsh(embedFrame.value, {
+            channel: "whalito",
+            type: "update-progress",
+            message: "更新完成，正在重启服务器…",
+          });
+          await restartServer();
+          embedNonce.value += 1;
+        }
+      } catch (e) {
+        postWhalitoError(typeof e === "string" ? e : String(e));
+      } finally {
+        installingDsh.value = false;
+        pushSnapshot();
+      }
+      return;
+    }
     if (action === "open-url") {
       const url = msg.url;
       if (typeof url === "string" && url.startsWith("https://")) {
@@ -527,7 +613,7 @@ async function handleWhalitoMessage(event: MessageEvent) {
       // 仅在内嵌 DSH 页面视图弹出（面板视图不显示右键菜单），并做边缘收拢。
       if (view.value === "embed" && typeof msg.x === "number" && typeof msg.y === "number") {
         const menuWidth = 170;
-        const menuHeight = 130;
+        const menuHeight = 250;
         const margin = 8;
         ctxMenu.value = {
           x: Math.max(margin, Math.min(msg.x, window.innerWidth - menuWidth - margin)),
@@ -538,6 +624,29 @@ async function handleWhalitoMessage(event: MessageEvent) {
     }
     if (action === "context-menu-close") {
       ctxMenu.value = null;
+      return;
+    }
+    if (action === "clipboard-set") {
+      // 内嵌页面复制：选区文本上行到这里 → 写入系统剪贴板。
+      const text = msg.text ?? "";
+      if (!text) return;
+      diag(`clipboard-set received, len=${text.length}, dbg=${JSON.stringify(msg.dbg ?? null)}`);
+      const ok = await invoke<void>("clipboard_write", { text })
+        .then(() => true)
+        .catch((e) => {
+          diag(`clipboard_write failed: ${typeof e === "string" ? e : String(e)}`);
+          return false;
+        });
+      if (ok) {
+        diag("clipboard_write ok");
+        showToast("已复制到剪贴板", "", 2000);
+      } else {
+        postWhalitoError("复制到剪贴板失败");
+      }
+      return;
+    }
+    if (action === "clipboard-noop") {
+      diag(`clipboard-noop: ${typeof msg.why === "string" ? msg.why : "?"}`);
       return;
     }
     if (action === "pick-directory") {
@@ -703,6 +812,12 @@ onMounted(async () => {
   unlisteners.push(
     await listen<string>("install-stage", (e) => {
       installStage.value = e.payload;
+      // 安装阶段回传设置分区（update-dsh / 面板安装都可见进度）。
+      postToDsh(embedFrame.value, {
+        channel: "whalito",
+        type: "update-progress",
+        message: stageText[e.payload] ?? e.payload,
+      });
     }),
   );
   unlisteners.push(
@@ -1082,26 +1197,29 @@ function autoScroll() {
     </template>
   </div>
 
-  <!-- 内嵌 DSH 页面右键自定义菜单（刷新页面 / 重启服务器 / 显示隐藏桌宠） -->
+  <!-- 内嵌 DSH 页面右键自定义菜单（复制/粘贴 ─ 刷新页面/重启服务器/显示隐藏桌宠） -->
   <div
     v-if="ctxMenu"
     class="ctx-menu"
     :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
     @contextmenu.prevent="ctxMenu = null"
   >
+    <button type="button" @click="ctxCopy">复制</button>
+    <button type="button" @click="ctxPaste">粘贴</button>
+    <div class="ctx-sep" />
     <button type="button" @click="ctxReload">刷新页面</button>
     <button type="button" @click="ctxRestart">重启服务器</button>
     <button type="button" @click="ctxTogglePet">显示 / 隐藏桌宠</button>
   </div>
 
-  <!-- 下载完成提示（会话日志导出等） -->
+  <!-- 下载完成/复制成功提示（无路径时只显示纯文本提示，不出现文件夹按钮） -->
   <div v-if="toast" class="toast">
     <div class="toast-body">
       <span class="toast-text">{{ toast.text }}</span>
-      <span class="toast-path" :title="toast.path">{{ toast.path }}</span>
+      <span v-if="toast.path" class="toast-path" :title="toast.path">{{ toast.path }}</span>
     </div>
     <div class="toast-actions">
-      <button type="button" class="toast-btn" @click="revealDownload(toast.path)">打开所在文件夹</button>
+      <button v-if="toast.path" type="button" class="toast-btn" @click="revealDownload(toast.path)">打开所在文件夹</button>
       <button type="button" class="toast-btn" @click="toast = null">✕</button>
     </div>
   </div>

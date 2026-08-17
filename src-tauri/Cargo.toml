@@ -1,6 +1,6 @@
 [package]
 name = "dsh-launcher"
-version = "0.4.2"
+version = "0.4.3"
 description = "鲸仔（Whalito）— DeepSeek Harness 一键安装与启动桌面助手"
 authors = ["dsh-launcher"]
 license = "MIT"
@@ -33,6 +33,8 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 tungstenite = "0.24"
 zip = "2"
 dirs = "6"
+# 系统剪贴板（内嵌 DSH 页面右键菜单的复制/剪切/粘贴由父窗口代为读写）
+arboard = "3"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

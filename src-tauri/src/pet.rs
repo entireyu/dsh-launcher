@@ -460,8 +460,15 @@ fn orchestrator(app: AppHandle) {
                             })
                             .collect();
                         if let Some(notice) = detect_completion(&prev_running, &current_running) {
-                            pet_log(&format!("pet notice: {}", notice.kind));
-                            set_notice(&app, notice);
+                            // 主窗口聚焦时用户正看着 DSH，「任务完成」通知冗余 → 抑制；
+                            // 被阻塞 / 被中断仍需提醒（可能不在场或需要处理）。
+                            let main_open = app.state::<AppState>().main_open.load(Ordering::SeqCst);
+                            if notice.kind == "completed" && main_open {
+                                pet_log("pet notice suppressed: main window focused");
+                            } else {
+                                pet_log(&format!("pet notice: {}", notice.kind));
+                                set_notice(&app, notice);
+                            }
                         }
                         prev_running = current_running;
                         if last_phase.as_deref() != Some("running") {

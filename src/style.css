@@ -525,6 +525,13 @@ button.link {
   color: var(--accent);
 }
 
+/* 右键菜单分组分割线 */
+.ctx-sep {
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--border);
+}
+
 /* 下载完成提示（右下角，自动消失） */
 .toast {
   position: fixed;

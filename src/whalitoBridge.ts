@@ -1,10 +1,12 @@
 // 与内嵌 DSH 页面"鲸仔"设置分区之间的 postMessage 桥。
-// 下行（本窗口 → iframe）：hello / settings / status / error 快照；
-// 上行（iframe → 本窗口）：ping / action。双方各自校验消息来源。
+// 下行（本窗口 → iframe）：hello / settings / status / error 快照、剪贴板指令；
+// 上行（iframe → 本窗口）：ping / action（含剪贴板文本）。双方各自校验消息来源。
 
 export interface WhalitoSettings {
   port: number;
   registry: string;
+  /** DSH 版本偏好（npm 发布标签）："latest"（稳定版，默认）/ "next"（预发布版）。 */
+  dshChannel: string;
   autostart: boolean;
   autoRestart: boolean;
   workspaceDir: string | null;
@@ -53,6 +55,12 @@ export interface WhalitoMessage {
   versions?: VersionsSnapshot;
   target?: string;
   url?: unknown;
+  /** 右键菜单复制上行的选区文本、粘贴下行的待插入文本。 */
+  text?: string;
+  /** 剪贴板链路诊断信息（右键快照类型/长度等）。 */
+  dbg?: unknown;
+  /** 剪贴板空操作原因（无选中内容等）。 */
+  why?: string;
   /** 右键菜单请求的点击位置（相对内嵌页面视口）。 */
   x?: number;
   y?: number;

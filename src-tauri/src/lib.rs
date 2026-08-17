@@ -136,6 +136,8 @@ pub fn run() {
             commands::whalito_download,
             commands::reveal_in_folder,
             commands::get_logs,
+            commands::clipboard_write,
+            commands::clipboard_read,
             settings_plugin::sync_settings_plugin,
             settings_plugin::bridge_diag,
             pet::show_main_window,
@@ -227,8 +229,20 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
+            if window.label() != "main" {
+                return;
+            }
+            let main_open = || window.app_handle().state::<AppState>().main_open.clone();
+            match event {
+                // 主窗口聚焦：用户正在查看 → 记录状态并视为已查看桌宠通知
+                //（清掉挂着的"任务完成/被阻塞/被中断"气泡）；失焦/隐藏则恢复提醒。
+                WindowEvent::Focused(focused) => {
+                    if *focused {
+                        crate::pet::clear_notice(window.app_handle());
+                    }
+                    main_open().store(*focused, Ordering::SeqCst);
+                }
+                WindowEvent::CloseRequested { api, .. } => {
                     let quitting = window
                         .app_handle()
                         .state::<AppState>()
@@ -236,9 +250,11 @@ pub fn run() {
                         .load(Ordering::SeqCst);
                     if !quitting {
                         api.prevent_close();
+                        main_open().store(false, Ordering::SeqCst);
                         let _ = window.hide();
                     }
                 }
+                _ => {}
             }
         })
         .run(tauri::generate_context!())

@@ -44,6 +44,8 @@ pub struct AppState {
     pub pet_snapshot: Arc<Mutex<Option<serde_json::Value>>>,
     /// 桌宠待查看通知（任务完成 / 被阻塞 / 被中断）；打开主界面后清除。
     pub pet_notice: Arc<Mutex<Option<crate::pet::PetNotice>>>,
+    /// 主窗口是否处于聚焦状态：聚焦视为用户正在查看，抑制桌宠"任务完成"通知。
+    pub main_open: Arc<AtomicBool>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -51,6 +53,10 @@ pub struct AppState {
 pub struct Settings {
     pub port: u16,
     pub registry: String,
+    /// DSH 版本偏好（npm 发布标签）："latest"（稳定版，默认）/ "next"（预发布版）。
+    /// 只影响「检查更新」与「更新到新版本」；首次安装固定稳定版。
+    #[serde(default = "default_dsh_channel")]
+    pub dsh_channel: String,
     pub autostart: bool,
     pub auto_restart: bool,
     pub workspace_dir: Option<String>,
@@ -67,11 +73,25 @@ fn default_pet_enabled() -> bool {
     true
 }
 
+fn default_dsh_channel() -> String {
+    "latest".to_string()
+}
+
+/// DSH 版本偏好归一化：仅 "next" 视为预发布通道，其余（含空串/脏值）一律 latest。
+pub fn normalize_dsh_channel(v: &str) -> &'static str {
+    if v.trim() == "next" {
+        "next"
+    } else {
+        "latest"
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             port: DEFAULT_PORT,
             registry: "https://registry.npmjs.org".to_string(),
+            dsh_channel: "latest".to_string(),
             autostart: false,
             auto_restart: true,
             workspace_dir: None,
@@ -1024,6 +1044,29 @@ fn _unused_order() -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalizes_dsh_channel() {
+        assert_eq!(normalize_dsh_channel("next"), "next");
+        assert_eq!(normalize_dsh_channel(" next "), "next");
+        assert_eq!(normalize_dsh_channel("latest"), "latest");
+        assert_eq!(normalize_dsh_channel(""), "latest");
+        assert_eq!(normalize_dsh_channel("beta"), "latest");
+        assert_eq!(normalize_dsh_channel("NEXT"), "latest");
+    }
+
+    #[test]
+    fn settings_deserialize_defaults_missing_dsh_channel_to_latest() {
+        // 旧版 config.json 没有 dshChannel 字段：必须回退 latest，保持旧行为。
+        let old = r#"{"port":3080,"registry":"https://registry.npmjs.org","autostart":false,"autoRestart":true,"petEnabled":true}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert_eq!(s.dsh_channel, "latest");
+
+        // 显式 next 必须保留。
+        let with_next = r#"{"port":3080,"registry":"https://registry.npmjs.org","dshChannel":"next","autostart":false,"autoRestart":true,"petEnabled":true}"#;
+        let s2: Settings = serde_json::from_str(with_next).unwrap();
+        assert_eq!(s2.dsh_channel, "next");
+    }
 
     #[test]
     fn parses_semver() {

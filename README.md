@@ -51,14 +51,14 @@
 
 ### Windows
 
-1. 在 [Releases](https://github.com/entireyu/dsh-whalito-desk/releases) 下载最新安装包 `Whalito_0.4.2_x64-setup.exe`
+1. 在 [Releases](https://github.com/entireyu/dsh-whalito-desk/releases) 下载最新安装包 `Whalito_0.4.3_x64-setup.exe`
 2. 双击安装（首次运行 Windows SmartScreen 会提示「未知发布者」，点击「仍要运行」即可）
 3. 打开鲸仔，其余交给它 —— 检测、补齐、启动全程自动
 4. 关闭窗口即最小化到托盘，需要时点击托盘图标唤回
 
 ### macOS（内部测试版）
 
-1. 在 [Releases](https://github.com/entireyu/dsh-whalito-desk/releases) 下载最新 `Whalito_0.4.2_universal.dmg`
+1. 在 [Releases](https://github.com/entireyu/dsh-whalito-desk/releases) 下载最新 `Whalito_0.4.3_universal.dmg`
 2. 双击挂载，把「Whalito」拖入「应用程序」（Applications）
 3. **首次打开**：安装包为内部测试版（未签名公证），请勿直接双击图标——在 Finder 中**右键 App → 打开 → 再点「打开」**确认一次，之后即可正常双击启动
 4. 打开鲸仔，其余交给它 —— 检测、补齐、启动全程自动；关闭窗口即隐藏到托盘（菜单栏图标）
@@ -91,7 +91,7 @@ macOS 环境检测与安装说明：
 | 一键安装 Node.js | Windows：winget / nvm / 便携 zip；macOS：官方 tar 包（免管理员）/ nvm / 自定义目录 |
 | 安装 / 更新 Harness | 支持切换 npm 镜像源，国内更快 |
 | 服务器管理 | 一键启动 / 停止 / 重启，异常自动拉起 |
-| 鲸仔设置分区 | DSH 设置面板内直接管理鲸仔设置（端口 / 镜像 / 自启 / 桌宠 / 版本检查与一键更新等），取代悬浮按钮 |
+| 鲸仔设置分区 | DSH 设置面板内直接管理鲸仔设置（端口 / 镜像 / 版本偏好 / 自启 / 桌宠 / 版本检查与一键更新等），取代悬浮按钮 |
 | 托盘常驻 | 最小化到托盘，支持开机自启 |
 | 实时日志 | 运行状态与输出实时可见 |
 
@@ -125,8 +125,8 @@ pnpm tauri dev        # 前端 dev server + Rust debug
 ### 打包
 
 ```bash
-pnpm tauri:build        # 生产包：Whalito_0.4.2_x64-setup.exe（DSH 端口 3080，数据目录 ~/.dsh）
-pnpm tauri:build:test   # 测试包：Whalito-Test_0.4.2_x64-setup.exe（DSH 端口 30080，数据目录 ~/.dsh-test）
+pnpm tauri:build        # 生产包：Whalito_0.4.3_x64-setup.exe（DSH 端口 3080，数据目录 ~/.dsh）
+pnpm tauri:build:test   # 测试包：Whalito-Test_0.4.3_x64-setup.exe（DSH 端口 30080，数据目录 ~/.dsh-test）
 ```
 
 测试包与生产包三隔离（包名/标识符、默认端口、DSH 数据目录均不同），可同时安装、同时运行、互不干扰。测试开关是编译期的 `WHALITO_TEST_BUILD=1`（见 `src-tauri/src/state.rs` 的 `TEST_BUILD`），生产构建不设置该变量，测试代码被编译器折叠、零残留。
@@ -147,7 +147,7 @@ rustup target add x86_64-apple-darwin
 pnpm tauri build --target universal-apple-darwin --config src-tauri/tauri.macos.conf.json
 ```
 
-- 打 `v*` tag 或手动触发 Release workflow → CI 同时构建 Windows NSIS 与 macOS universal dmg，并上传到 GitHub Release（资产名如 `Whalito_0.4.2_universal.dmg`）
+- 打 `v*` tag 或手动触发 Release workflow → CI 同时构建 Windows NSIS 与 macOS universal dmg，并上传到 GitHub Release（资产名如 `Whalito_0.4.3_universal.dmg`）
 - 产物为 ad-hoc 签名（内部测试分发；未公证，用户右键 → 打开）。正式对外分发需配置 Apple Developer ID 证书并启用 notarytool 公证（工作流内已预留注释位）
 - macOS 版本更新器匹配 Release 中的 `.dmg` 资产（Windows 匹配 `_x64-setup.exe`），一键更新会自动挂载 dmg 覆盖安装并重启
 
@@ -188,7 +188,8 @@ pnpm tauri build --target universal-apple-darwin --config src-tauri/tauri.macos.
 | --- | --- |
 | 检测 Node | Windows：`where.exe node` / `node --version` / 兜底 `C:\Program Files\nodejs\node.exe`；macOS：按优先级探测 自定义目录 → nvm（`~/.nvm`）→ fnm/volta → Homebrew → `/usr/bin/node` → PATH，并逐个 `node --version` 验证 |
 | 装 Node | Windows：`winget install/upgrade OpenJS.NodeJS.LTS`；nvm：`nvm install 22.x` + `nvm use`；便携：下载 node zip 解压到用户目录。macOS：下载 `node-v22.x-darwin-{arm64,x64}.tar.gz` → `/usr/bin/tar` 解压到 `~/Library/Application Support/com.deepseek.dsh-launcher/node/`（免管理员）；nvm：`bash/zsh -lc 'source nvm.sh && nvm install 22 && nvm alias default 22'` 并回写解析出的 node 绝对路径 |
-| 装 / 更新 Harness | `node <npm-cli.js> install -g @deepseek-ai/dsh[ @latest]`（应用专用前缀，隔离免管理员） |
+| 装 / 更新 Harness | 首次安装 `node <npm-cli.js> install -g @deepseek-ai/dsh`；更新按「DSH 版本偏好」安装 `@deepseek-ai/dsh@latest`（稳定版）或 `@deepseek-ai/dsh@next`（预发布版）（应用专用前缀，隔离免管理员） |
+| 检查 Harness 更新 | `node <npm-cli.js> view @deepseek-ai/dsh@<latest|next> version`（标签按「DSH 版本偏好」，走所选 npm 镜像源） |
 | 校验 | `node <dsh/bin.js> --version` + `--dump-default-config` |
 | 启动 | `node <dsh/bin.js> web --port <port>`（macOS 额外注入用户 shell PATH） |
 | 停止 | Windows：`taskkill /PID <pid> /T /F`；macOS/Linux：`kill <pid>` |

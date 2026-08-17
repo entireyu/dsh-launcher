@@ -36,6 +36,16 @@ impl Shared {
     fn registry(&self) -> String {
         self.settings.lock().unwrap().registry.trim().to_string()
     }
+
+    /// DSH 版本偏好（normalize 后）：仅 "next" 走预发布通道，其余一律 latest。
+    fn dsh_channel(&self) -> &'static str {
+        state::normalize_dsh_channel(&self.settings.lock().unwrap().dsh_channel)
+    }
+}
+
+/// 按版本偏好拼出 npm 安装/查询规格：`@deepseek-ai/dsh@latest` / `@deepseek-ai/dsh@next`。
+fn dsh_update_spec(channel: &str) -> String {
+    format!("@deepseek-ai/dsh@{channel}")
 }
 
 #[tauri::command]
@@ -477,6 +487,8 @@ fn install_dsh_inner(app: &AppHandle, shared: &Shared, spec: &str) -> Result<Env
 pub async fn install_dsh(app: AppHandle, st: State<'_, AppState>) -> Result<EnvInfo, String> {
     let shared = Shared::from_state(&st);
     let app_for_sync = app.clone();
+    // 首次安装固定 latest（稳定版）：版本偏好只影响检查与更新，
+    // 避免预发布版直接用于全新环境；装好后可切偏好再更新。
     let env = tauri::async_runtime::spawn_blocking(move || install_dsh_inner(&app, &shared, "@deepseek-ai/dsh"))
         .await
         .map_err(|e| e.to_string())??;
@@ -489,8 +501,9 @@ pub async fn install_dsh(app: AppHandle, st: State<'_, AppState>) -> Result<EnvI
 pub async fn update_dsh(app: AppHandle, st: State<'_, AppState>) -> Result<EnvInfo, String> {
     let shared = Shared::from_state(&st);
     let app_for_sync = app.clone();
+    let spec = dsh_update_spec(shared.dsh_channel());
     let env = tauri::async_runtime::spawn_blocking(move || {
-        install_dsh_inner(&app, &shared, "@deepseek-ai/dsh@latest")
+        install_dsh_inner(&app, &shared, &spec)
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -519,6 +532,7 @@ pub async fn verify_dsh(st: State<'_, AppState>) -> Result<String, String> {
 pub async fn check_latest_version(st: State<'_, AppState>) -> Result<Option<String>, String> {
     let shared = Shared::from_state(&st);
     let registry = shared.registry();
+    let spec = dsh_update_spec(shared.dsh_channel());
     tauri::async_runtime::spawn_blocking(move || {
         let env = state::detect_env(shared.node_dir().as_deref());
         let Some(node) = env.node_path else {
@@ -530,7 +544,7 @@ pub async fn check_latest_version(st: State<'_, AppState>) -> Result<Option<Stri
         let mut args: Vec<String> = vec![
             cli.to_string_lossy().to_string(),
             "view".to_string(),
-            "@deepseek-ai/dsh".to_string(),
+            spec,
             "version".to_string(),
         ];
         if !registry.is_empty() {
@@ -985,9 +999,48 @@ pub fn reveal_in_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 写入系统剪贴板（内嵌 DSH 页面右键菜单「复制 / 剪切」由父窗口代写）。
+#[tauri::command]
+pub fn clipboard_write(text: String) -> Result<(), String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| format!("无法打开剪贴板：{e}"))?;
+    cb.set_text(text).map_err(|e| format!("写入剪贴板失败：{e}"))
+}
+
+/// 读取系统剪贴板（内嵌 DSH 页面右键菜单「粘贴」由父窗口代读）。
+#[tauri::command]
+pub fn clipboard_read() -> Result<String, String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| format!("无法打开剪贴板：{e}"))?;
+    cb.get_text().map_err(|e| format!("读取剪贴板失败：{e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_roundtrip() {
+        // 直接验证 arboard 在本机可用（复制/粘贴链路的关键依赖）。
+        // 测试会写剪贴板：先保存原内容，结束后恢复，不污染用户剪贴板。
+        let mut cb = arboard::Clipboard::new().expect("clipboard should be openable");
+        let prev = cb.get_text().ok();
+        let result = (|| -> Result<(), String> {
+            cb.set_text("whalito-clipboard-roundtrip")
+                .map_err(|e| format!("write failed: {e}"))?;
+            let got = cb.get_text().map_err(|e| format!("read failed: {e}"))?;
+            assert_eq!(got, "whalito-clipboard-roundtrip");
+            Ok(())
+        })();
+        if let Some(p) = prev {
+            let _ = cb.set_text(p);
+        }
+        result.expect("roundtrip should succeed");
+    }
+
+    #[test]
+    fn dsh_update_spec_uses_selected_channel() {
+        assert_eq!(dsh_update_spec("latest"), "@deepseek-ai/dsh@latest");
+        assert_eq!(dsh_update_spec("next"), "@deepseek-ai/dsh@next");
+    }
 
     #[test]
     fn sanitize_filename_strips_hostile_chars() {

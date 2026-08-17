@@ -67,12 +67,20 @@
         window.addEventListener('contextmenu', function (e) {
           e.preventDefault();
           contextMenuOpen = true;
+          // 此刻 iframe 仍有焦点：先快照选区/光标，供后续复制/剪切/粘贴使用。
+          snapshotClipboard();
           postToParent({
             channel: CHANNEL,
             type: 'action',
             action: 'context-menu',
             x: e.clientX,
             y: e.clientY,
+            dbg: {
+              ctx: clipboardCtx ? (clipboardCtx.field ? 'field' : 'doc') : null,
+              sel: clipboardCtx
+                ? (clipboardCtx.field ? clipboardCtx.end - clipboardCtx.start : clipboardCtx.text.length)
+                : -1,
+            },
           });
         });
         function closeContextMenu() {
@@ -87,6 +95,197 @@
           if (e.key === 'Escape') closeContextMenu();
         });
       }
+
+      // ---- 剪贴板协作（右键菜单复制/剪切/粘贴） ----
+      // 选区/光标在本页面（iframe）里，系统剪贴板由父窗口经 Rust 读写：
+      // 上行选区文本（clipboard-set），下行粘贴文本 / 剪切回删确认。
+      // 关键：右键后用户去点父窗口的菜单，iframe 会失焦——activeElement 变
+      // body、输入框选区不可达，因此右键瞬间就把「输入框+光标区间」或
+      // 「文档选区」快照下来，复制/剪切/粘贴全部基于快照执行。
+      var clipboardCtx = null;
+
+      function isTextField(el) {
+        if (!el || !el.tagName) return false;
+        if (el.tagName === 'TEXTAREA') return true;
+        if (el.tagName !== 'INPUT') return false;
+        var t = (el.type || '').toLowerCase();
+        return t !== 'checkbox' && t !== 'radio' && t !== 'button' && t !== 'submit' &&
+          t !== 'reset' && t !== 'file' && t !== 'image' && t !== 'color' && t !== 'range';
+      }
+
+      // 右键时快照当前选区/光标；无选中内容时输入框/可编辑区仍保留（粘贴目标）。
+      function snapshotClipboard() {
+        clipboardCtx = null;
+        var el = document.activeElement;
+        if (isTextField(el)) {
+          var start = el.selectionStart == null ? 0 : el.selectionStart;
+          var end = el.selectionEnd == null ? start : el.selectionEnd;
+          // 文本在复制时才取（走组件自己的复制管线，见 clipboardText）。
+          clipboardCtx = { field: el, start: start, end: end, text: '' };
+          return;
+        }
+        var sel = window.getSelection();
+        if (!sel || sel.rangeCount === 0) return;
+        var editable = el && el.isContentEditable ? el : null;
+        if (sel.isCollapsed) {
+          // 可编辑区域（contenteditable，如聊天输入框）的光标也是粘贴目标。
+          if (editable) {
+            clipboardCtx = { editable: editable, range: sel.getRangeAt(0).cloneRange(), text: '' };
+          }
+          return;
+        }
+        var text = sel.toString();
+        if (!text) return;
+        clipboardCtx = { range: sel.getRangeAt(0).cloneRange(), text: text, editable: editable };
+      }
+
+      // 取复制文本：输入框走组件自己的复制管线（派发合成 copy 事件，claim
+      // 令牌会展开成可见文本，与 Ctrl+C 一致——直接取 value 子串会把 U+FFFC
+      // 隐形占位符带进剪贴板）；组件未接管（纯文本走原生路径）时回退原始子串。
+      function clipboardText() {
+        if (!clipboardCtx) return '';
+        if (clipboardCtx.field) {
+          var el = clipboardCtx.field;
+          var dt = new DataTransfer();
+          var ev = new ClipboardEvent('copy', { bubbles: true, cancelable: true });
+          try { Object.defineProperty(ev, 'clipboardData', { value: dt }); } catch (e) { /* 忽略 */ }
+          try {
+            el.dispatchEvent(ev);
+            var clean = dt.getData('text/plain');
+            if (clean) return clean;
+          } catch (e) { /* 忽略 */ }
+          return el.value.substring(clipboardCtx.start, clipboardCtx.end);
+        }
+        return clipboardCtx.text || '';
+      }
+
+      // 可编辑区域插入：恢复选区后走 execCommand('insertText')（触发 input
+      // 事件，React 等框架能感知）；失败则直接操作 DOM 节点兜底。
+      function insertIntoEditable(el, text, savedRange) {
+        try {
+          el.focus();
+          var sel = window.getSelection();
+          if (!sel) return;
+          if (savedRange) {
+            sel.removeAllRanges();
+            sel.addRange(savedRange.cloneRange());
+          } else if (sel.rangeCount === 0) {
+            var caret = document.createRange();
+            caret.selectNodeContents(el);
+            caret.collapse(false);
+            sel.addRange(caret);
+          }
+          var ok = false;
+          try { ok = document.execCommand('insertText', false, text); } catch (e) { ok = false; }
+          if (!ok && sel.rangeCount > 0) {
+            var rr = sel.getRangeAt(0);
+            rr.deleteContents();
+            var node = document.createTextNode(text);
+            rr.insertNode(node);
+            sel.removeAllRanges();
+            var after = document.createRange();
+            after.setStartAfter(node);
+            after.collapse(true);
+            sel.addRange(after);
+          }
+        } catch (e) { /* 忽略 */ }
+      }
+
+      // 向输入框派发合成 paste 事件：DSH 聊天输入框是受控组件（可见文字由
+      // backdrop 从 React 状态渲染，textarea 字形透明），直接改 DOM 值不会
+      // 同步状态 → 粘贴内容"选中才可见"。组件自带 onPaste 管线（preventDefault
+      // + 机器插入），合成事件能走通它；defaultPrevented 为 false 时回退到
+      // 普通输入框的 setRangeText。
+      function pasteIntoField(el, text, start, end) {
+        try {
+          el.focus({ preventScroll: true });
+          if (start != null && end != null) el.setSelectionRange(start, end);
+        } catch (e) { /* 忽略 */ }
+        var dt = new DataTransfer();
+        dt.setData('text/plain', text);
+        var ev = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
+        try { Object.defineProperty(ev, 'clipboardData', { value: dt }); } catch (e) { /* 忽略 */ }
+        el.dispatchEvent(ev);
+        if (!ev.defaultPrevented) {
+          var s = el.selectionStart == null ? 0 : el.selectionStart;
+          var en = el.selectionEnd == null ? s : el.selectionEnd;
+          el.setRangeText(text, s, en, 'end');
+        }
+      }
+
+      // 在快照位置插入文本（输入框走合成 paste 事件；可编辑区域走
+      // insertIntoEditable；文档选区 deleteContents + insertNode）。
+      // 快照失效时回退实时选区。
+      function clipboardInsert(text) {
+        if (!clipboardCtx) {
+          // 无快照（右键点在空白处）：回退当前活动元素，尽量粘贴。
+          var live = document.activeElement;
+          if (isTextField(live)) {
+            pasteIntoField(live, text, null, null);
+          } else if (live && live.isContentEditable) {
+            insertIntoEditable(live, text, null);
+          }
+          return;
+        }
+        try {
+          if (clipboardCtx.field) {
+            pasteIntoField(clipboardCtx.field, text, clipboardCtx.start, clipboardCtx.end);
+            return;
+          }
+          if (clipboardCtx.editable) {
+            insertIntoEditable(clipboardCtx.editable, text, clipboardCtx.range);
+            return;
+          }
+          var r = clipboardCtx.range;
+          r.deleteContents();
+          var node = document.createTextNode(text);
+          r.insertNode(node);
+          var sel = window.getSelection();
+          if (sel) {
+            sel.removeAllRanges();
+            var after = document.createRange();
+            after.setStartAfter(node);
+            after.collapse(true);
+            sel.addRange(after);
+          }
+        } catch (e) {
+          // 快照引用已失效（React 重渲染等）：尝试实时选区一次。
+          try {
+            var liveSel = window.getSelection();
+            if (liveSel && !liveSel.isCollapsed) {
+              var lr = liveSel.getRangeAt(0);
+              lr.deleteContents();
+              lr.insertNode(document.createTextNode(text));
+            }
+          } catch (e2) { /* 忽略 */ }
+        }
+      }
+
+      // 下行剪贴板指令监听（工厂级，插件加载时注册一次）：
+      // 右键菜单可在 DSH 页面任意位置弹出（聊天页/设置页），而 WhalitoSection
+      // 组件只在「鲸仔设置」页挂载，其内部监听器在其它页面会被卸载——
+      // 剪贴板指令必须在这里统一接收，否则点击菜单后消息石沉大海。
+      window.addEventListener('message', function (event) {
+        var data = event.data;
+        if (!data || data.channel !== CHANNEL) return;
+        if (data.type !== 'action') return;
+        if (data.action === 'context-copy') {
+          var text = clipboardText();
+          if (text) {
+            sendAction('clipboard-set', {
+              text: text,
+              dbg: {
+                ctx: clipboardCtx && clipboardCtx.field ? 'field' : 'doc',
+                len: text.length,
+              },
+            });
+          } else {
+            sendAction('clipboard-noop', { why: 'copy-no-selection' });
+          }
+        } else if (data.action === 'context-paste') {
+          if (typeof data.text === 'string' && data.text !== '') clipboardInsert(data.text);
+        }
+      });
 
       // 接管 DSH 会话日志导出下载：DSH 用程序化 anchor.click() 触发浏览器
       // 下载，合成 click 事件不经过 document，只能包装原型方法。href 指向
@@ -179,6 +378,11 @@
         { key: 'npm', label: 'npm 官方源', url: 'https://registry.npmjs.org' },
         { key: 'npmmirror', label: 'npmmirror（国内加速）', url: 'https://registry.npmmirror.com' },
       ];
+      // DSH 版本偏好预设：对应 npm 发布标签，检查更新与更新安装都按所选标签查询。
+      var CHANNEL_PRESETS = [
+        { key: 'latest', label: '稳定版（latest）' },
+        { key: 'next', label: '预发布版（next）' },
+      ];
       var presetStyle = {
         background: 'transparent',
         border: '1px solid rgba(127,127,127,.45)',
@@ -224,6 +428,7 @@
         var tries = React.useState(0);
         var versions = React.useState(null);
         var checking = React.useState('');
+        var updating = React.useState('');
         var updateStage = React.useState('');
         // 消息监听器挂在只跑一次的 useEffect 里，闭包会捕获挂载时的 state 数组
         // （值恒为初始值）；用 ref 在每次渲染时刷新最新快照供监听器读取。
@@ -251,6 +456,7 @@
               if (data.versions) versions[1](data.versions);
               connected[1](true);
               checking[1]('');
+              updating[1]('');
               done = true;
             } else if (data.type === 'status') {
               if (data.status) status[1](data.status);
@@ -259,6 +465,7 @@
             } else if (data.type === 'versions') {
               if (data.versions) versions[1](data.versions);
               checking[1]('');
+              updating[1]('');
             } else if (data.type === 'picked-dir') {
               // 原生目录选择结果：写入草稿并标记脏（即使此前已编辑过）。
               if (typeof data.path === 'string' && data.field === 'workspaceDir') {
@@ -309,6 +516,7 @@
           return {
             port: Number(base.port),
             registry: base.registry == null ? '' : base.registry,
+            dshChannel: base.dshChannel === 'next' ? 'next' : 'latest',
             autostart: !!base.autostart,
             autoRestart: !!base.autoRestart,
             workspaceDir: base.workspaceDir == null || base.workspaceDir === '' ? null : base.workspaceDir,
@@ -345,6 +553,22 @@
           sendAction('save-settings', { value: value });
         }
 
+        // 版本偏好快捷切换：点击即保存生效（与镜像源预设一致），
+        // 主窗口保存后会自动按新偏好重查版本。
+        function switchChannel(key) {
+          var base = draft[0] || settings[0] || {};
+          var next = Object.assign({}, base, { dshChannel: key });
+          draft[1](next);
+          dirty[1](true);
+          var value = buildValue(next);
+          if (!Number.isInteger(value.port) || value.port < 1 || value.port > 65535) {
+            notice[1]('端口必须是 1–65535 之间的整数，请修正后再切换版本偏好');
+            return;
+          }
+          notice[1]('');
+          sendAction('save-settings', { value: value });
+        }
+
         function checkButton(target) {
           var busy = checking[0] === target;
           return h('button', {
@@ -359,13 +583,17 @@
           }, busy ? '检查中…' : '检查更新');
         }
 
-        function resultText(info, isWhalito, isTestBuild) {
+        function resultText(info, isWhalito, isTestBuild, channelLabel) {
           if (!info || !info.latest) return null;
           if (!info.updateAvailable) {
-            return h('span', { key: 'result', style: styles.hint }, '已是最新（' + info.latest + '）');
+            // DSH 行附通道标注（鲸仔行不标注）：区分"按哪个通道查的"，
+            // 避免 latest/next 指向同一版本时误以为切换没生效。
+            return h('span', { key: 'result', style: styles.hint },
+              '已是最新（' + info.latest + (isWhalito ? '' : '，' + channelLabel) + '）');
           }
           return h('span', { key: 'result', style: { fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } }, [
-            h('span', { key: 'result-text' }, '发现新版本 ' + info.latest),
+            h('span', { key: 'result-text' },
+              '发现新版本 ' + info.latest + (isWhalito ? '' : '（' + channelLabel + '）')),
             isWhalito && info.autoUpdate
               ? h('button', {
                   key: 'apply-update',
@@ -392,7 +620,16 @@
                   ? null
                   : h('span', { key: 'no-auto-hint', style: styles.hint },
                       isTestBuild ? '（测试版不提供自动更新）' : '（该版本没有自动更新安装包）'))
-              : h('span', { key: 'result-hint', style: styles.hint }, '（更新请到鲸仔面板执行）'),
+              : h('button', {
+                  key: 'update-dsh',
+                  type: 'button',
+                  style: presetActiveStyle,
+                  disabled: updating[0] === 'dsh',
+                  onClick: function () {
+                    updating[1]('dsh');
+                    sendAction('update-dsh');
+                  },
+                }, updating[0] === 'dsh' ? '更新中…' : '立即更新'),
           ]);
         }
 
@@ -405,11 +642,26 @@
             style: { display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid rgba(127,127,127,.25)', paddingTop: '12px' },
           }, [
             h('div', { key: 'versions-title', style: { fontWeight: 600, fontSize: '13px' } }, '版本信息'),
+            vd && vd.current
+              ? h('div', { key: 'row-dsh-channel', style: styles.statusRow }, [
+                  h('span', { key: 'dsh-channel-label', style: styles.hint }, 'DSH 版本偏好：'),
+                  CHANNEL_PRESETS.map(function (c) {
+                    var active = (d.dshChannel === 'next' ? 'next' : 'latest') === c.key;
+                    return h('button', {
+                      key: 'dsh-channel-' + c.key,
+                      type: 'button',
+                      style: active ? presetActiveStyle : presetStyle,
+                      onClick: function () { switchChannel(c.key); },
+                    }, c.label);
+                  }),
+                  h('span', { key: 'dsh-channel-hint', style: styles.hint }, '选择 DSH 的更新来源，点击即保存并重新检查'),
+                ])
+              : null,
             h('div', { key: 'row-dsh', style: styles.statusRow }, [
               h('span', { key: 'dsh-label', style: { fontWeight: 600 } }, 'DSH：'),
               h('span', { key: 'dsh-current' }, vd && vd.current ? vd.current : '未安装'),
               checkButton('dsh'),
-              resultText(vd, false, false),
+              resultText(vd, false, false, d.dshChannel === 'next' ? '预发布版' : '稳定版'),
             ]),
             h('div', { key: 'row-whalito', style: styles.statusRow }, [
               h('span', { key: 'whalito-label', style: { fontWeight: 600 } }, '鲸仔：'),

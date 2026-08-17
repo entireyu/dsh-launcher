@@ -409,7 +409,12 @@ fn install_dsh_inner(app: &AppHandle, shared: &Shared, spec: &str) -> Result<Env
         .node_path
         .clone()
         .ok_or("未检测到 Node.js，请先安装 Node.js。".to_string())?;
-    let cli = state::npm_cli(&node).ok_or("未找到 npm，请确认 Node.js 安装完整。".to_string())?;
+    let cli = state::npm_cli(&node).ok_or_else(|| {
+        format!(
+            "未找到 npm（node 位于 {node}，版本 {}），请确认 Node.js 安装完整。",
+            env.version.as_deref().unwrap_or("未知")
+        )
+    })?;
     let install_prefix = env
         .install_prefix
         .clone()

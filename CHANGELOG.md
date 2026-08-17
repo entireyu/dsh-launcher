@@ -11,6 +11,7 @@
 
 ### 修复
 - 修复 Release workflow 发布说明提取失败导致不发布：`release-notes.js` 在 `"type": "module"` 包下按 ESM 运行、`require` 不可用——改名为 `.cjs` 强制 CommonJS
+- 修复 macOS 安装 Harness 报「未找到 npm」：`npm_cli` 在符号链接解析后只探测 node 真实路径的同级 `node_modules/npm` 与上一级 `lib/node_modules/npm`，而 Homebrew（Apple Silicon）的 node 真实路径在 `Cellar/node/<ver>/bin`，npm 挂在 prefix 层 `/opt/homebrew/lib/node_modules/npm`（向上 4 级，旧实现永远找不到；官方 pkg 布局同样漏掉，需向上 2 级）——改为沿真实路径祖先目录逐级向上（6 级）探测两种挂载点，天然兼容 Homebrew / 官方 pkg / nvm / fnm / volta / 便携 tar 包；新增 Homebrew 与官方 pkg 布局单测；「未找到 npm」报错信息附带 node 路径与版本，便于区分 Node 未装完整的情况
 
 ## [0.4.1] - 2026-08-16
 

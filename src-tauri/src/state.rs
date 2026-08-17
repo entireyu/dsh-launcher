@@ -565,23 +565,38 @@ pub fn npm_cli(node_path: &str) -> Option<PathBuf> {
     if portable.exists() {
         return Some(portable);
     }
-    // 布局二：符号链接解析后的真实路径附近——
-    // 同级 node_modules/npm（nvm-windows 的 versions/vX/node_modules）
-    // 或 ../lib/node_modules/npm（Homebrew Cellar / macOS 官方 pkg / nvm）
+    // 布局二：符号链接解析后的真实路径，沿祖先目录逐级向上探测两种挂载点：
+    //   <ancestor>/node_modules/npm（nvm-windows 的 versions/vX/node_modules）
+    //   <ancestor>/lib/node_modules/npm（POSIX 全局模块目录）
+    // 各级安装方式的离地高度（从真实 node 所在目录向上）：
+    //   - nvm / fnm / volta / 便携 tar 包：1 级（<prefix>/lib/node_modules/npm）
+    //   - macOS 官方 pkg：2 级（node 在 lib/node_modules/node/bin，
+    //     npm 在 lib/node_modules/npm）
+    //   - Homebrew（Cellar）：4 级（node 在 Cellar/node/<ver>/bin，
+    //     npm 挂在 prefix 层 /opt/homebrew|/usr/local/lib/node_modules/npm）
+    // 取 6 级覆盖全部并留余量；每级只做两次 exists() 探测，开销可忽略。
     let real = std::fs::canonicalize(node_path).ok()?;
-    let real_dir = real.parent()?;
-    for candidate in [
-        real_dir.join("node_modules").join("npm").join("bin").join("npm-cli.js"),
-        real_dir
-            .join("..")
-            .join("lib")
-            .join("node_modules")
-            .join("npm")
-            .join("bin")
-            .join("npm-cli.js"),
-    ] {
-        if candidate.exists() {
-            return Some(candidate);
+    let mut ancestor = real.parent()?.to_path_buf();
+    for _ in 0..6 {
+        for candidate in [
+            ancestor
+                .join("node_modules")
+                .join("npm")
+                .join("bin")
+                .join("npm-cli.js"),
+            ancestor
+                .join("lib")
+                .join("node_modules")
+                .join("npm")
+                .join("bin")
+                .join("npm-cli.js"),
+        ] {
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        if !ancestor.pop() {
+            break;
         }
     }
     None
@@ -1058,6 +1073,133 @@ mod tests {
     #[test]
     fn picks_none_for_empty_candidates() {
         assert!(pick_best_node(&[]).is_none());
+    }
+
+    #[test]
+    fn npm_cli_finds_nearby_layouts() {
+        let base = std::env::temp_dir().join(format!("whalito-npmcli-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        // POSIX 常规布局：<prefix>/bin/node + <prefix>/lib/node_modules/npm（Homebrew / nvm / tar 包）
+        let posix = base.join("posix");
+        let node = posix.join("bin").join("node");
+        let npm_cli_path = posix
+            .join("lib")
+            .join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npm-cli.js");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(npm_cli_path.parent().unwrap()).unwrap();
+        std::fs::write(&node, "x").unwrap();
+        std::fs::write(&npm_cli_path, "x").unwrap();
+        // macOS 上 /var → /private/var 等符号链接会让 canonicalize 结果带前缀，
+        // 期望值同样解析后再比较。
+        let expected = std::fs::canonicalize(&npm_cli_path).unwrap();
+        assert_eq!(
+            npm_cli(node.to_str().unwrap())
+                .map(|p| std::fs::canonicalize(&p).unwrap().to_string_lossy().to_string()),
+            Some(expected.to_string_lossy().to_string())
+        );
+
+        // Windows 便携布局：node 同目录 node_modules/npm
+        let win = base.join("win");
+        let win_node = win.join("node.exe");
+        let win_cli = win
+            .join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npm-cli.js");
+        std::fs::create_dir_all(win_cli.parent().unwrap()).unwrap();
+        std::fs::write(&win_node, "x").unwrap();
+        std::fs::write(&win_cli, "x").unwrap();
+        let expected_win = std::fs::canonicalize(&win_cli).unwrap();
+        assert_eq!(
+            npm_cli(win_node.to_str().unwrap())
+                .map(|p| std::fs::canonicalize(&p).unwrap().to_string_lossy().to_string()),
+            Some(expected_win.to_string_lossy().to_string())
+        );
+
+        // 空目录：找不到
+        let empty = base.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(npm_cli(empty.join("node").to_str().unwrap()).is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// macOS 官方 nodejs.org pkg 布局：/usr/local/bin/node 是符号链接，
+    /// 真实路径在 lib/node_modules/node/bin/node，npm-cli.js 在
+    /// lib/node_modules/npm/bin（node 上两级前缀的 lib 下）。
+    #[cfg(unix)]
+    #[test]
+    fn npm_cli_finds_macos_official_pkg_layout() {
+        let base = std::env::temp_dir().join(format!("whalito-npmcli-pkg-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("usr").join("local");
+        let bin_link = root.join("bin").join("node");
+        let real_node = root
+            .join("lib")
+            .join("node_modules")
+            .join("node")
+            .join("bin")
+            .join("node");
+        let npm_cli_path = root
+            .join("lib")
+            .join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npm-cli.js");
+        std::fs::create_dir_all(bin_link.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(real_node.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(npm_cli_path.parent().unwrap()).unwrap();
+        std::fs::write(&real_node, "x").unwrap();
+        std::fs::write(&npm_cli_path, "x").unwrap();
+        std::os::unix::fs::symlink(&real_node, &bin_link).unwrap();
+        let expected = std::fs::canonicalize(&npm_cli_path).unwrap();
+        assert_eq!(
+            npm_cli(bin_link.to_str().unwrap())
+                .map(|p| std::fs::canonicalize(&p).unwrap().to_string_lossy().to_string()),
+            Some(expected.to_string_lossy().to_string())
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Homebrew 布局：/opt/homebrew/bin/node 是符号链接，真实二进制在
+    /// Cellar/node/<ver>/bin/node，npm 却挂在 prefix 层 lib/node_modules/npm
+    /// （离真实 node 4 级）——旧实现只查 Cellar 内部导致「未找到 npm」。
+    #[cfg(unix)]
+    #[test]
+    fn npm_cli_finds_homebrew_prefix_layout() {
+        let base = std::env::temp_dir().join(format!("whalito-npmcli-brew-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let prefix = base.join("opt").join("homebrew");
+        let bin_link = prefix.join("bin").join("node");
+        let real_node = prefix
+            .join("Cellar")
+            .join("node")
+            .join("25.3.0")
+            .join("bin")
+            .join("node");
+        let npm_cli_path = prefix
+            .join("lib")
+            .join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npm-cli.js");
+        std::fs::create_dir_all(bin_link.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(real_node.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(npm_cli_path.parent().unwrap()).unwrap();
+        std::fs::write(&real_node, "x").unwrap();
+        std::fs::write(&npm_cli_path, "x").unwrap();
+        std::os::unix::fs::symlink(&real_node, &bin_link).unwrap();
+        let expected = std::fs::canonicalize(&npm_cli_path).unwrap();
+        assert_eq!(
+            npm_cli(bin_link.to_str().unwrap())
+                .map(|p| std::fs::canonicalize(&p).unwrap().to_string_lossy().to_string()),
+            Some(expected.to_string_lossy().to_string())
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

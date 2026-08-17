@@ -4,6 +4,11 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 新增
+- 添加 MIT 许可证（`LICENSE`），并在 `package.json` / `src-tauri/Cargo.toml` / README 中标注许可信息
+
 ## [0.4.2] - 2026-08-17
 
 ### 变更

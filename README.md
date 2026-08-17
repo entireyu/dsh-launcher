@@ -194,3 +194,7 @@ pnpm tauri build --target universal-apple-darwin --config src-tauri/tauri.macos.
 | 停止 | Windows：`taskkill /PID <pid> /T /F`；macOS/Linux：`kill <pid>` |
 | 开机自启 | Windows：注册表 Run 键；macOS：`~/Library/LaunchAgents/com.deepseek.dsh-launcher.plist` |
 | 健康检查 | `GET <解析出的 URL>`（800ms 超时） |
+
+## 📄 许可证
+
+本项目基于 [MIT License](LICENSE) 开源。Copyright (c) 2026 Evan Hang。详见 [LICENSE](LICENSE)。

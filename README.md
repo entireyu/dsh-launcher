@@ -13,6 +13,8 @@
 
 不需要懂 Node，不需要记命令，开箱即用。
 
+> 💡 **欢迎反馈**：使用中遇到问题或有功能建议，欢迎到 [GitHub Issues](https://github.com/entireyu/dsh-whalito-desk/issues) 提 issue，我们会认真对待每一条反馈。
+
 ## 📸 界面预览
 
 ![鲸仔界面](snap-layout.png)
@@ -195,6 +197,13 @@ pnpm tauri build --target universal-apple-darwin --config src-tauri/tauri.macos.
 | 停止 | Windows：`taskkill /PID <pid> /T /F`；macOS/Linux：`kill <pid>` |
 | 开机自启 | Windows：注册表 Run 键；macOS：`~/Library/LaunchAgents/com.deepseek.dsh-launcher.plist` |
 | 健康检查 | `GET <解析出的 URL>`（800ms 超时） |
+
+## 💬 反馈与贡献
+
+欢迎提 issue 和参与改进：
+
+- **遇到问题 / 功能建议**：到 [GitHub Issues](https://github.com/entireyu/dsh-whalito-desk/issues) 提交，附上系统版本、鲸仔版本、日志或截图会更快定位问题。
+- **参与开发**：欢迎提交 Pull Request（见上方「开发者」一节的本地开发与打包说明）。
 
 ## 📄 许可证
 

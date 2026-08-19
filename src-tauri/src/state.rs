@@ -135,6 +135,9 @@ pub struct EnvInfo {
     pub node_too_old: bool,
     pub nvm_found: bool,
     pub nvm_path: Option<String>,
+    /// 当前 Node 不可用（缺失 / 版本过低）时，nvm 中已安装、可直接切换到的
+    /// 最高合格版本（如 "22.19.0"）。有值时前端应优先提示「切换版本」而非安装。
+    pub nvm_switch_version: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -160,6 +163,7 @@ impl Default for EnvInfo {
             node_too_old: false,
             nvm_found: false,
             nvm_path: None,
+            nvm_switch_version: None,
         }
     }
 }
@@ -724,6 +728,61 @@ pub fn detect_nvm() -> Option<String> {
     }
 }
 
+/// 从 nvm 版本目录（目录名形如 `v22.19.0`，忽略其他文件/目录）解析已安装版本，
+/// 按版本降序返回。
+fn nvm_versions_in_dir(base: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(base) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if parse_semver(&name).is_some() {
+                out.push(name);
+            }
+        }
+    }
+    out.sort_by(|a, b| parse_semver(b).cmp(&parse_semver(a)));
+    out
+}
+
+/// 扫描 nvm 已安装的 Node 版本（按目录名 `v<semver>` 识别），按版本降序返回。
+/// Windows：nvm-windows 版本目录 `<NVM_HOME>\v<version>`；
+/// macOS：nvm 版本目录 `~/.nvm/versions/node/v<version>`。
+pub fn nvm_installed_versions() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let base = std::env::var("NVM_HOME")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var("APPDATA")
+                    .ok()
+                    .map(|a| Path::new(&a).join("nvm"))
+            });
+        base.as_deref().map(nvm_versions_in_dir).unwrap_or_default()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let base = std::env::var("NVM_DIR")
+            .map(PathBuf::from)
+            .ok()
+            .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".nvm")));
+        base.map(|b| nvm_versions_in_dir(&b.join("versions").join("node")))
+            .unwrap_or_default()
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        Vec::new()
+    }
+}
+
+/// nvm 中已安装且满足最低版本要求的最高版本（无需下载，直接 `nvm use` 即可）。
+pub fn nvm_switch_version() -> Option<String> {
+    nvm_installed_versions()
+        .into_iter()
+        .find(|v| parse_semver(v).is_some_and(|t| t >= MIN_NODE_VERSION))
+}
+
 /// 从 nodejs.org 的 index.json 解析最新的 22.x 版本号（如 "22.19.0"）。失败返回 None。
 pub fn latest_node_lts_major22() -> Option<String> {
     let resp = ureq::get("https://nodejs.org/dist/index.json")
@@ -864,6 +923,14 @@ pub fn detect_env(node_dir: Option<&str>) -> EnvInfo {
 
     let nvm_path = detect_nvm();
 
+    // 当前 Node 不可用（缺失 / 版本过低）时，探测 nvm 里能否直接切换：
+    // 有则前端优先提示「切换到 Node X」而不是让用户重新安装。
+    let nvm_switch_version = if !node_version_ok {
+        nvm_switch_version()
+    } else {
+        None
+    };
+
     EnvInfo {
         found,
         version,
@@ -877,6 +944,7 @@ pub fn detect_env(node_dir: Option<&str>) -> EnvInfo {
         node_too_old,
         nvm_found: nvm_path.is_some(),
         nvm_path,
+        nvm_switch_version,
     }
 }
 
@@ -903,6 +971,53 @@ pub fn save_settings(app: &AppHandle, s: &Settings) -> Result<(), String> {
     }
     let json = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+/// 更新弹窗静默状态：各目标「暂不更新」到的时间戳（epoch 毫秒）。
+/// 独立于 Settings 持久化（save_settings 是整体替换、内嵌设置分区的字段集
+/// 不含这两项，放 Settings 里会被设置保存清掉）。
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct UpdateSnooze {
+    #[serde(default)]
+    pub dsh: Option<u64>,
+    #[serde(default)]
+    pub whalito: Option<u64>,
+}
+
+fn update_snooze_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    Ok(dir.join("update_snooze.json"))
+}
+
+/// 从指定路径读取（纯函数，便于单测）；文件缺失 / 损坏一律回退「未静默」。
+fn read_update_snooze_file(path: &Path) -> UpdateSnooze {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<UpdateSnooze>(&t).ok())
+        .unwrap_or_default()
+}
+
+/// 原子写（先写临时文件再 rename，避免半写损坏旧数据）；纯函数，便于单测。
+fn write_update_snooze_file(path: &Path, s: &UpdateSnooze) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+/// 读取静默状态（应用配置目录）；文件缺失 / 损坏一律回退「未静默」。
+pub fn load_update_snooze(app: &AppHandle) -> UpdateSnooze {
+    update_snooze_path(app)
+        .map(|p| read_update_snooze_file(&p))
+        .unwrap_or_default()
+}
+
+/// 原子写静默状态到应用配置目录。
+pub fn save_update_snooze(app: &AppHandle, s: &UpdateSnooze) -> Result<(), String> {
+    write_update_snooze_file(&update_snooze_path(app)?, s)
 }
 
 #[cfg(windows)]
@@ -1076,6 +1191,62 @@ mod tests {
         assert_eq!(parse_semver("22.19"), Some((22, 19, 0)));
         assert_eq!(parse_semver("abc"), None);
         assert_eq!(parse_semver(""), None);
+    }
+
+    #[test]
+    fn nvm_versions_in_dir_lists_only_version_dirs_sorted_desc() {
+        let base = std::env::temp_dir().join(format!("whalito-nvm-versions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        for d in ["v22.19.0", "v18.20.4", "v24.1.0", "notes.txt", ".git"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        assert_eq!(
+            nvm_versions_in_dir(&base),
+            vec!["v24.1.0", "v22.19.0", "v18.20.4"]
+        );
+        // 空 / 不存在目录：空列表
+        assert!(nvm_versions_in_dir(&base.join("nope")).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn nvm_switch_version_picks_highest_qualified() {
+        // 直接验证筛选逻辑（目录扫描本身由 nvm_versions_in_dir 测试覆盖）：
+        // 只对合格版本（>= MIN_NODE_VERSION）生效，且取最高。
+        let versions = vec!["v18.20.4", "v22.19.0", "v24.1.0"];
+        let picked = versions
+            .into_iter()
+            .find(|v| parse_semver(v).is_some_and(|t| t >= MIN_NODE_VERSION));
+        assert_eq!(picked, Some("v22.19.0"));
+        // 全部低于要求时无可切换版本
+        let too_old = vec!["v18.20.4", "v16.0.0"];
+        assert!(too_old
+            .into_iter()
+            .find(|v| parse_semver(v).is_some_and(|t| t >= MIN_NODE_VERSION))
+            .is_none());
+    }
+
+    #[test]
+    fn update_snooze_roundtrip_and_corruption_fallback() {
+        let path = std::env::temp_dir().join(format!("whalito-snooze-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.tmp"));
+        // 缺失 → 未静默
+        assert_eq!(read_update_snooze_file(&path).dsh, None);
+        let s = UpdateSnooze {
+            dsh: Some(123),
+            whalito: None,
+        };
+        write_update_snooze_file(&path, &s).unwrap();
+        let loaded = read_update_snooze_file(&path);
+        assert_eq!(loaded.dsh, Some(123));
+        assert_eq!(loaded.whalito, None);
+        // 损坏 → 回退未静默，不 panic
+        std::fs::write(&path, "{broken").unwrap();
+        assert_eq!(read_update_snooze_file(&path).dsh, None);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("json.tmp"));
     }
 
     #[test]

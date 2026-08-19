@@ -296,6 +296,89 @@ fn install_node_nvm_macos(app: &AppHandle, shared: &Shared) -> Result<EnvInfo, S
     Ok(state::detect_env(Some(&node_dir)))
 }
 
+/// 切换到 nvm 中已安装的指定版本（只切换不下载，目标版本必须已安装）。
+/// 版本号来自检测结果的 nvm_switch_version。切换后重新检测环境。
+#[tauri::command]
+pub async fn switch_node_nvm(
+    app: AppHandle,
+    st: State<'_, AppState>,
+    version: String,
+) -> Result<EnvInfo, String> {
+    let shared = Shared::from_state(&st);
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(windows)]
+        {
+            switch_node_nvm_inner(&app, &shared, &version)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            switch_node_nvm_macos(&app, &shared, &version)
+        }
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        {
+            Err("当前平台不支持 nvm 切换".to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[cfg(windows)]
+fn switch_node_nvm_inner(
+    app: &AppHandle,
+    shared: &Shared,
+    version: &str,
+) -> Result<EnvInfo, String> {
+    let nvm = state::detect_nvm().ok_or("未检测到 nvm，无法切换 Node 版本。")?;
+    state::push_log(
+        &shared.logs,
+        &format!("[系统] 正在切换 Node 版本（nvm use {version}，若需要管理员权限请确认）"),
+    );
+    state::run_streaming(app, &nvm, &["use", version])?;
+    state::push_log(&shared.logs, "[系统] nvm 切换完成，正在重新检测");
+    let node_dir = shared.node_dir();
+    Ok(state::detect_env(node_dir.as_deref()))
+}
+
+/// macOS：nvm 是 shell 函数，source nvm.sh 后在同一 shell 里
+/// 设为默认并切换，再用 `nvm which <version>` 解析出 node 路径回写 node_dir。
+#[cfg(target_os = "macos")]
+fn switch_node_nvm_macos(
+    app: &AppHandle,
+    shared: &Shared,
+    version: &str,
+) -> Result<EnvInfo, String> {
+    let nvm_sh = state::detect_nvm()
+        .ok_or("未检测到 nvm（~/.nvm/nvm.sh），无法切换 Node 版本。")?;
+    let script = format!(
+        "source \"{nvm_sh}\" && nvm alias default {version} && nvm use {version} && printf '%s' \"$(nvm which {version})\""
+    );
+    state::push_log(
+        &shared.logs,
+        &format!("[系统] 正在切换 Node 版本（nvm use {version}）"),
+    );
+    let out = state::run_output("zsh", &["-lc", &script])
+        .or_else(|_| state::run_output("bash", &["-lc", &script]))?;
+    let node_bin = out
+        .lines()
+        .next_back()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or("nvm 切换完成，但未能解析 Node 路径")?;
+    let node_dir = Path::new(&node_bin)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .ok_or("nvm 切换完成，但未能解析 Node 目录")?;
+    {
+        let mut s = shared.settings.lock().unwrap();
+        s.node_dir = Some(node_dir.clone());
+    }
+    let s = shared.settings.lock().unwrap().clone();
+    state::save_settings(app, &s)?;
+    state::push_log(&shared.logs, "[系统] nvm 切换完成，正在重新检测");
+    Ok(state::detect_env(Some(&node_dir)))
+}
+
 fn install_node_portable_inner(
     app: &AppHandle,
     shared: &Shared,
@@ -528,34 +611,43 @@ pub async fn verify_dsh(st: State<'_, AppState>) -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
+/// 查询 DSH 最新版本（`npm view <spec> version`，走所选镜像源）。
+/// 任何一步失败（无 node / 无 npm / 网络错误）返回 None；供设置分区检查与
+/// 后台每小时更新通知共用。
+pub fn latest_dsh_version(
+    node_dir: Option<String>,
+    registry: &str,
+    channel: &str,
+) -> Option<String> {
+    let env = state::detect_env(node_dir.as_deref());
+    let node = env.node_path?;
+    let cli = state::npm_cli(&node)?;
+    let spec = dsh_update_spec(channel);
+    let mut args: Vec<String> = vec![
+        cli.to_string_lossy().to_string(),
+        "view".to_string(),
+        spec,
+        "version".to_string(),
+    ];
+    if !registry.is_empty() {
+        args.push("--registry".to_string());
+        args.push(registry.to_string());
+    }
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    state::run_output(&node, &arg_refs)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 #[tauri::command]
 pub async fn check_latest_version(st: State<'_, AppState>) -> Result<Option<String>, String> {
     let shared = Shared::from_state(&st);
+    let node_dir = shared.node_dir();
     let registry = shared.registry();
-    let spec = dsh_update_spec(shared.dsh_channel());
+    let channel = shared.dsh_channel().to_string();
     tauri::async_runtime::spawn_blocking(move || {
-        let env = state::detect_env(shared.node_dir().as_deref());
-        let Some(node) = env.node_path else {
-            return Ok(None);
-        };
-        let Some(cli) = state::npm_cli(&node) else {
-            return Ok(None);
-        };
-        let mut args: Vec<String> = vec![
-            cli.to_string_lossy().to_string(),
-            "view".to_string(),
-            spec,
-            "version".to_string(),
-        ];
-        if !registry.is_empty() {
-            args.push("--registry".to_string());
-            args.push(registry);
-        }
-        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        match state::run_output(&node, &arg_refs) {
-            Ok(v) => Ok(Some(v.trim().to_string())),
-            Err(_) => Ok(None),
-        }
+        Ok(latest_dsh_version(node_dir, &registry, &channel))
     })
     .await
     .map_err(|e| e.to_string())?

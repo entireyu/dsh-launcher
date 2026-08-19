@@ -2,7 +2,9 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { dshOrigin, isWhalitoMessage, postToDsh, toPlain } from "./whalitoBridge";
+import LoadingScreen from "./LoadingScreen.vue";
 import type {
   VersionsSnapshot,
   WhalitoMessage,
@@ -22,12 +24,30 @@ interface EnvInfo {
   nodeTooOld: boolean;
   nvmFound: boolean;
   nvmPath: string | null;
+  /** 当前 Node 不可用时，nvm 已安装、可直接切换到的最高合格版本。 */
+  nvmSwitchVersion: string | null;
 }
 
 interface ServerStatus {
   phase: string;
   url: string | null;
   pid: number | null;
+}
+
+/** 后台更新提示（来自 Rust 每小时检查的 update-available 事件）。 */
+interface UpdateNotice {
+  target: "dsh" | "whalito";
+  current: string;
+  latest: string;
+  changelog: string | null;
+  url: string | null;
+}
+
+/** 鲸仔自更新结果（重启后一次性校验：当前版本 vs 目标版本）。 */
+interface UpdateMarkerResult {
+  success: boolean;
+  from: string;
+  to: string;
 }
 
 interface Settings {
@@ -45,6 +65,9 @@ interface Settings {
 
 const env = ref<EnvInfo | null>(null);
 const server = ref<ServerStatus>({ phase: "stopped", url: null, pid: null });
+// 服务器启停/重启进行中的文案：内嵌页在切换期间显示 loading，
+// 而不是因 url 暂时为空直接跳到「服务器未运行」。
+const serverBusy = ref("");
 const settings = ref<Settings | null>(null);
 // 当前平台（"windows" / "macos" / "linux"），由后端 get_platform 命令返回。
 const platform = ref<string>("windows");
@@ -65,17 +88,21 @@ const toast = ref<{ text: string; path: string } | null>(null);
 let toastTimer: number | undefined;
 
 const installingNode = ref(false);
+// nvm 切换确认（两步点击）：第一步亮出「确认切换」，避免误触直接改默认版本。
+const confirmSwitchNode = ref(false);
 const installingDsh = ref(false);
-const verifying = ref(false);
-const checkingUpdate = ref(false);
 const latestVersion = ref<string | null>(null);
 // DSH 更新进度文案（面板进度条 / 内嵌页更新 loading 共用）。
 const dshUpdateMessage = ref("");
 // 鲸仔自更新状态：全屏遮罩显示下载 / 安装进度，直到应用退出重启。
 const whalitoUpdating = ref(false);
 const whalitoUpdateMessage = ref("");
+// 后台更新提示：队列 + 当前展示项（一次可能同时发现 DSH 与鲸仔两个新版本；
+// 更新进行中 / 忙碌时先排队，空闲再弹）。
+const updateNotices = ref<UpdateNotice[]>([]);
+const currentUpdateNotice = ref<UpdateNotice | null>(null);
 
-// 视图：flow = 引导流程 / panel = 高级面板 / embed = 内嵌页面
+// 视图：flow = 引导流程 / panel = 鲸仔管理后台 / embed = 内嵌页面
 const view = ref<"flow" | "panel" | "embed">("flow");
 const stage = ref<"detecting" | "node" | "dsh" | "server">("detecting");
 const flowError = ref<string>("");
@@ -95,17 +122,28 @@ const stageText: Record<string, string> = {
   error: "安装失败",
 };
 
-const updateAvailable = computed(() => {
-  if (!env.value?.dshInstalled || !env.value.dshVersion || !latestVersion.value) return false;
-  return latestVersion.value !== env.value.dshVersion;
+// 引导流程的全屏 loading 阶段（检测环境 / 安装 DSH / 启动服务器）。
+const flowLoading = computed(() => {
+  return (
+    stage.value === "detecting" || stage.value === "dsh" || stage.value === "server"
+  );
 });
 
-const isLatest = computed(() => {
-  return (
-    !!env.value?.dshInstalled &&
-    !!latestVersion.value &&
-    latestVersion.value === env.value.dshVersion
-  );
+const flowLoadingStatus = computed(() => {
+  switch (stage.value) {
+    case "dsh":
+      return "安装 DeepSeek Harness 中";
+    case "server":
+      return "启动服务器中";
+    default:
+      return "检测环境中";
+  }
+});
+
+const flowLoadingDetail = computed(() => {
+  if (stage.value === "dsh") return stageText[installStage.value] ?? "准备中…";
+  if (stage.value === "server") return "首次启动可能需要一点时间，请稍候…";
+  return "";
 });
 
 const unlisteners: UnlistenFn[] = [];
@@ -121,8 +159,55 @@ const phaseText: Record<string, string> = {
   error: "异常",
 };
 
-const phaseClass = computed(() => server.value.phase);
-const serverPhaseText = computed(() => phaseText[server.value.phase] ?? server.value.phase);
+// ============ 管理后台状态总览条 ============
+interface OverviewItem {
+  label: string;
+  text: string;
+  state: string; // ok | warn | bad | muted（对应 .dot 色类）
+}
+
+/** 管理后台顶部概览：Node / Harness / 服务器 三项状态一目了然。 */
+const overviewItems = computed<OverviewItem[]>(() => {
+  const e = env.value;
+  const nodeState = !e?.found ? "bad" : e.nodeTooOld ? "warn" : "ok";
+  const nodeText = !e?.found
+    ? "未检测到"
+    : e.nodeTooOld
+      ? `版本过低 ${e.version ?? ""}`
+      : `已安装 ${e.version ?? ""}`;
+  const dshState = e?.dshInstalled ? "ok" : "bad";
+  const dshText = e?.dshInstalled ? `已安装 ${e.dshVersion ?? ""}` : "未安装";
+  const phase = server.value.phase;
+  const serverState =
+    phase === "running" || phase === "external"
+      ? "ok"
+      : phase === "starting"
+        ? "warn"
+        : phase === "error"
+          ? "bad"
+          : "muted";
+  const serverText = phaseText[phase] ?? phase;
+  return [
+    { label: "Node.js", text: nodeText, state: nodeState },
+    { label: "DeepSeek Harness", text: dshText, state: dshState },
+    { label: "服务器", text: serverText, state: serverState },
+  ];
+});
+
+/** 复制服务器地址到剪贴板（复用 Rust clipboard_write）。 */
+async function copyServerUrl() {
+  if (!server.value.url) return;
+  const ok = await invoke<void>("clipboard_write", { text: server.value.url })
+    .then(() => true)
+    .catch(() => false);
+  if (ok) showToast("已复制服务器地址", "");
+  else postWhalitoError("复制服务器地址失败");
+}
+
+/** 隐藏到托盘：close() 触发 CloseRequested，非退出状态下被拦截为 hide。 */
+function hideToTray() {
+  getCurrentWindow().close();
+}
 
 async function wrap<T>(task: string, fn: () => Promise<T>): Promise<T | undefined> {
   busy.value = task;
@@ -170,6 +255,7 @@ async function refreshAll() {
 }
 
 async function installNode() {
+  confirmSwitchNode.value = false;
   installingNode.value = true;
   installStage.value = "install";
   try {
@@ -184,6 +270,7 @@ async function installNode() {
 }
 
 async function upgradeNode() {
+  confirmSwitchNode.value = false;
   installingNode.value = true;
   installStage.value = "install";
   try {
@@ -198,6 +285,7 @@ async function upgradeNode() {
 }
 
 async function installNodeNvm() {
+  confirmSwitchNode.value = false;
   installingNode.value = true;
   installStage.value = "install";
   try {
@@ -211,7 +299,105 @@ async function installNodeNvm() {
   }
 }
 
+/** 切换到 nvm 已安装的合格版本（两步确认：第一次点击亮出确认，第二次执行）。 */
+async function switchNodeNvm() {
+  const target = env.value?.nvmSwitchVersion;
+  if (!target) return;
+  if (!confirmSwitchNode.value) {
+    confirmSwitchNode.value = true;
+    return;
+  }
+  confirmSwitchNode.value = false;
+  installingNode.value = true;
+  try {
+    const r = await wrap(`正在切换到 Node ${target}…`, () =>
+      invoke<EnvInfo>("switch_node_nvm", { version: target }),
+    );
+    if (r) {
+      env.value = r;
+      await runFlow();
+    }
+  } finally {
+    installingNode.value = false;
+  }
+}
+
+// ============ 后台更新提示（每小时检查弹窗） ============
+/** 弹出下一个更新提示；更新进行中 / 忙碌时等待（watch 空闲后补弹）。 */
+function maybeShowUpdateNotice() {
+  if (installingDsh.value || whalitoUpdating.value || busy.value) return;
+  if (currentUpdateNotice.value) return;
+  const next = updateNotices.value.shift();
+  if (next) currentUpdateNotice.value = next;
+}
+
+/** 暂不更新：该目标静默 24 小时（后端持久化），并弹下一条（如有）。 */
+async function snoozeUpdate() {
+  const n = currentUpdateNotice.value;
+  if (!n) return;
+  try {
+    await invoke("snooze_update", { target: n.target });
+  } catch (e) {
+    postWhalitoError(typeof e === "string" ? e : String(e));
+  }
+  currentUpdateNotice.value = null;
+  maybeShowUpdateNotice();
+}
+
+/** 立即更新：按目标走对应更新流程（弹窗本身就是确认，鲸仔跳过原生二次确认）。 */
+function updateFromPopup() {
+  const n = currentUpdateNotice.value;
+  if (!n) return;
+  currentUpdateNotice.value = null;
+  if (n.target === "dsh") {
+    void runDshUpdateFromPopup();
+    return;
+  }
+  whalitoUpdating.value = true;
+  whalitoUpdateMessage.value = "正在准备更新…";
+  invoke("whalito_apply_update", { skipConfirm: true }).then(
+    () => {
+      // 正常返回只有「更新取消/无更新」路径；真正成功时应用已退出重启。
+      whalitoUpdating.value = false;
+      whalitoUpdateMessage.value = "";
+    },
+    (e) => {
+      whalitoUpdating.value = false;
+      whalitoUpdateMessage.value = "";
+      postWhalitoError(typeof e === "string" ? e : String(e));
+    },
+  );
+}
+
+/** 弹窗触发的 DSH 更新：与设置分区 update-dsh 动作一致（停止 → 更新 → 启动）。 */
+async function runDshUpdateFromPopup() {
+  installingDsh.value = true;
+  dshUpdateMessage.value = "正在更新 DeepSeek Harness…";
+  postToDsh(embedFrame.value, {
+    channel: "whalito",
+    type: "update-progress",
+    message: "正在更新 DeepSeek Harness…",
+  });
+  try {
+    await performDshUpdate();
+  } catch (e) {
+    postWhalitoError(typeof e === "string" ? e : String(e));
+    if (server.value.phase !== "running" && server.value.phase !== "external") {
+      await startServer().catch(() => {});
+    }
+  } finally {
+    await finishDshUpdate();
+  }
+}
+
+/** 弹窗里的「查看详情」链接：交给系统浏览器打开。 */
+function openNoticeUrl() {
+  const n = currentUpdateNotice.value;
+  if (n?.url) void invoke("open_url", { url: n.url }).catch(() => {});
+}
+
 async function installNodePortable() {
+  confirmSwitchNode.value = false;
   installingNode.value = true;
   try {
     const dir = await invoke<string | null>("pick_node_dir");
@@ -272,47 +458,39 @@ async function finishDshUpdate() {
   pushSnapshot();
 }
 
-async function updateDsh() {
-  installingDsh.value = true;
-  dshUpdateMessage.value = "正在更新 DeepSeek Harness…";
-  try {
-    await performDshUpdate();
-  } catch (e) {
-    error.value = typeof e === "string" ? e : String(e);
-    // 更新失败时尽力恢复服务器，避免留下停服状态。
-    if (server.value.phase !== "running" && server.value.phase !== "external") {
-      await startServer().catch(() => {});
-    }
-  } finally {
-    await finishDshUpdate();
-  }
-}
-
-async function verifyDsh() {
-  verifying.value = true;
-  try {
-    const r = await wrap("正在校验…", () => invoke<string>("verify_dsh"));
-    if (r) notice.value = r;
-  } finally {
-    verifying.value = false;
-  }
-}
-
 async function startServer() {
   autoRestartCount.value = 0;
-  const r = await wrap("正在启动…", () => invoke<ServerStatus>("start_server"));
-  if (r) server.value = r;
+  serverBusy.value = "启动服务器中";
+  try {
+    const r = await wrap("正在启动…", () => invoke<ServerStatus>("start_server"));
+    if (r) server.value = r;
+    else await refreshStatus(); // 失败：按真实状态同步，避免残留旧界面
+  } finally {
+    serverBusy.value = "";
+  }
 }
 
 async function doStop() {
-  const r = await wrap("正在停止…", () => invoke<ServerStatus>("stop_server"));
-  if (r) server.value = r;
+  serverBusy.value = "停止服务器中";
+  try {
+    const r = await wrap("正在停止…", () => invoke<ServerStatus>("stop_server"));
+    if (r) server.value = r;
+    else await refreshStatus();
+  } finally {
+    serverBusy.value = "";
+  }
 }
 
 async function restartServer() {
   confirmingStop.value = false;
-  const r = await wrap("正在重启…", () => invoke<ServerStatus>("restart_server"));
-  if (r) server.value = r;
+  serverBusy.value = "重启服务器中";
+  try {
+    const r = await wrap("正在重启…", () => invoke<ServerStatus>("restart_server"));
+    if (r) server.value = r;
+    else await refreshStatus(); // 重启失败：按真实状态同步，避免残留旧地址
+  } finally {
+    serverBusy.value = "";
+  }
 }
 
 // ============ 内嵌 DSH 页面右键菜单 ============
@@ -634,10 +812,20 @@ async function processWhalitoMessage(msg: WhalitoMessage, eventOrigin: string) {
       // 先进入全屏「正在更新」状态，让下载/安装进度可见，消除「点了没反应」的割裂。
       whalitoUpdating.value = true;
       whalitoUpdateMessage.value = "正在准备更新…";
-      invoke("whalito_apply_update").catch((e) => {
-        whalitoUpdating.value = false;
-        postWhalitoError(typeof e === "string" ? e : String(e));
-      });
+      invoke("whalito_apply_update").then(
+        () => {
+          // 命令正常返回只有一种情况：用户在原生确认框点了「取消」
+          //（真正更新成功时应用已退出，不会走到这里）。取消也要收起遮罩，
+          // 否则界面会一直停在「鲸仔正在更新…」。
+          whalitoUpdating.value = false;
+          whalitoUpdateMessage.value = "";
+        },
+        (e) => {
+          whalitoUpdating.value = false;
+          whalitoUpdateMessage.value = "";
+          postWhalitoError(typeof e === "string" ? e : String(e));
+        },
+      );
       return;
     }
     if (action === "context-menu") {
@@ -765,14 +953,11 @@ async function togglePet() {
   }
 }
 
-async function checkLatest(showSpinner = false) {
-  if (showSpinner) checkingUpdate.value = true;
+async function checkLatest() {
   try {
     latestVersion.value = await invoke<string | null>("check_latest_version");
   } catch {
     /* 忽略 */
-  } finally {
-    if (showSpinner) checkingUpdate.value = false;
   }
 }
 
@@ -810,7 +995,7 @@ async function runFlow() {
   if (server.value.phase !== "running" && server.value.phase !== "external") {
     await startServer();
     if (server.value.phase !== "running") {
-      flowError.value = "服务器启动失败，请重试或进入高级面板查看日志。";
+      flowError.value = "服务器启动失败，请重试或进入鲸仔管理后台查看日志。";
       return;
     }
   }
@@ -900,6 +1085,22 @@ onMounted(async () => {
       });
     }),
   );
+  // 后台每小时检查发现的更新：入队并尝试弹出（更新进行中则等空闲）。
+  unlisteners.push(
+    await listen<UpdateNotice>("update-available", (e) => {
+      const n = e.payload;
+      if (!n || (n.target !== "dsh" && n.target !== "whalito")) return;
+      // 同一目标已在队列/展示中则忽略（事件重复到达防抖）。
+      if (
+        currentUpdateNotice.value?.target === n.target ||
+        updateNotices.value.some((x) => x.target === n.target)
+      ) {
+        return;
+      }
+      updateNotices.value.push(n);
+      maybeShowUpdateNotice();
+    }),
+  );
   window.addEventListener("message", handleWhalitoMessage);
   // 鲸仔面板右键不弹菜单；iframe 内的右键事件不会冒泡到这里，
   // 所以只影响面板自身。
@@ -907,6 +1108,15 @@ onMounted(async () => {
 
   await Promise.all([loadSettings(), refreshLogs()]);
   platform.value = await invoke<string>("get_platform").catch(() => "windows");
+  // 鲸仔自更新重启后：校验更新是否成功（标记一次性，读后即删）。
+  invoke<UpdateMarkerResult | null>("whalito_update_result")
+    .then((r) => {
+      if (!r) return;
+      if (r.success) showToast(`已成功更新到 v${r.to}`, "");
+      else
+        error.value = `鲸仔更新未完成：当前仍为 v${r.from}，目标 v${r.to}，请重试或检查网络。`;
+    })
+    .catch(() => {});
   pollTimer = window.setInterval(refreshStatus, 3000);
   await runFlow();
   checkLatest();
@@ -927,6 +1137,9 @@ watch(view, () => {
   ctxMenu.value = null;
 });
 
+// 更新进行中 / 忙碌结束时补弹排队中的更新提示。
+watch([installingDsh, whalitoUpdating, busy], maybeShowUpdateNotice);
+
 const logBox = ref<HTMLElement | null>(null);
 function autoScroll() {
   requestAnimationFrame(() => {
@@ -938,14 +1151,17 @@ function autoScroll() {
 <template>
   <!-- ============ 内嵌页面（单窗口） ============ -->
   <div v-if="view === 'embed'" class="embed">
-    <!-- DSH 更新中：服务器已停止、正在重装，显示更新 loading 而非「服务器未运行」 -->
-    <div v-if="installingDsh" class="embed-updating">
-      <p class="embed-updating-title">正在更新 DeepSeek Harness…</p>
-      <div class="progress-track">
-        <div class="progress-bar"></div>
-      </div>
-      <p class="hint">{{ dshUpdateMessage }}</p>
-    </div>
+    <!-- DSH 更新 / 服务器启停重启中：全屏统一 loading，替代「服务器未运行」闪屏 -->
+    <LoadingScreen
+      v-if="installingDsh"
+      status="更新 DeepSeek Harness 中"
+      :detail="dshUpdateMessage"
+    />
+    <LoadingScreen
+      v-else-if="serverBusy"
+      :status="serverBusy"
+      detail="服务器状态切换中，请稍候…"
+    />
     <template v-else>
       <iframe
         v-if="server.url"
@@ -959,7 +1175,7 @@ function autoScroll() {
         <p>服务器未运行</p>
         <div class="row">
           <button class="primary" @click="startServer">启动服务器</button>
-          <button @click="goPanel">返回鲸仔助手</button>
+          <button @click="goPanel">进入鲸仔管理后台</button>
           <button @click="showSettings = true">打开设置</button>
         </div>
       </div>
@@ -970,100 +1186,122 @@ function autoScroll() {
   <div v-else class="app">
     <!-- 引导式主流程 -->
     <div v-if="view === 'flow'" class="flow">
-      <div class="flow-card">
-        <div class="flow-brand">
-          <span class="dot big" :class="phaseClass"></span>
-          <div>
-            <h1>鲸仔</h1>
-            <p class="sub en">Whalito</p>
+      <!-- 全屏统一 loading：检测环境 / 安装 DSH / 启动服务器（出错时自动切回卡片） -->
+      <template v-if="flowLoading && !flowError">
+        <LoadingScreen :status="flowLoadingStatus" :detail="flowLoadingDetail" />
+        <button class="ghost link flow-exit" @click="goPanel">进入鲸仔管理后台</button>
+      </template>
+      <template v-else>
+        <div class="flow-card">
+          <div class="flow-brand">
+            <img class="flow-brand-logo" src="/logo.png" alt="鲸仔" />
+            <div>
+              <h1>鲸仔</h1>
+              <p class="sub en">Whalito</p>
+            </div>
           </div>
+
+          <!-- 出错：错误信息 + 重试（loading 阶段失败也会走到这里，不会无限转圈） -->
+          <template v-if="flowError">
+            <p class="flow-title">操作未完成</p>
+            <p class="banner error">{{ flowError }}</p>
+            <div class="flow-actions">
+              <button class="primary" @click="runFlow">重试</button>
+              <button class="ghost" @click="goPanel">进入鲸仔管理后台</button>
+            </div>
+          </template>
+
+          <!-- Node 缺失 / 版本过低 -->
+          <template v-else-if="stage === 'node'">
+            <p class="flow-title">
+              {{ env?.found ? `当前 Node 版本过低（${env?.version}）` : "未检测到 Node.js" }}
+            </p>
+
+            <!-- nvm 里已有合格版本：优先提示切换，无需重新安装 -->
+            <template v-if="env?.nvmSwitchVersion">
+              <p class="hint good">
+                检测到 nvm 中已安装更高版本 Node {{ env.nvmSwitchVersion }}，可直接切换使用，无需重新下载安装。
+              </p>
+              <div class="flow-actions">
+                <button class="primary" :disabled="installingNode" @click="switchNodeNvm">
+                  {{
+                    installingNode
+                      ? "正在切换…"
+                      : confirmSwitchNode
+                        ? `再次点击确认切换到 Node ${env.nvmSwitchVersion}`
+                        : `切换到 Node ${env.nvmSwitchVersion}（nvm 已安装）`
+                  }}
+                </button>
+                <button
+                  v-if="confirmSwitchNode"
+                  :disabled="installingNode"
+                  @click="confirmSwitchNode = false"
+                >
+                  取消
+                </button>
+              </div>
+              <p class="hint">切换会执行 nvm use，把当前默认 Node 改为 {{ env.nvmSwitchVersion }}。也可以选择下方其他方式：</p>
+            </template>
+            <p v-else class="hint">DeepSeek Harness 需要 Node.js ≥ 22.19.0。请选择一种安装方式：</p>
+
+            <div class="flow-actions">
+              <button
+                v-if="env?.nvmFound"
+                class="primary"
+                :disabled="installingNode"
+                @click="installNodeNvm"
+              >
+                {{ installingNode ? "正在安装…" : "用 nvm 安装 Node 22" }}
+              </button>
+              <button
+                class="primary"
+                :disabled="installingNode"
+                @click="env?.found ? upgradeNode() : installNode()"
+              >
+                {{
+                  installingNode
+                    ? "正在安装…"
+                    : env?.found
+                      ? platform === "windows"
+                        ? "一键升级（winget）"
+                        : "一键升级 Node"
+                      : platform === "windows"
+                        ? "一键安装（winget）"
+                        : "一键安装 Node 22"
+                }}
+              </button>
+              <button :disabled="installingNode" @click="installNodePortable">
+                自定义安装目录…
+              </button>
+            </div>
+            <p v-if="env?.nvmFound" class="hint good">已检测到 nvm（{{ env.nvmPath }}）</p>
+            <p v-if="platform === 'macos'" class="hint">
+              鲸仔将下载 Node.js 22 官方安装包到「~/Library/Application
+              Support」，无需管理员权限。
+            </p>
+          </template>
+
+          <p v-if="busy" class="banner busy">⏳ {{ busy }}</p>
+          <p v-if="error && !flowError" class="banner error">{{ error }}</p>
+
+          <button
+            v-if="stage === 'node' && !flowError"
+            class="ghost link"
+            @click="goPanel"
+          >
+            进入鲸仔管理后台
+          </button>
         </div>
-
-        <p v-if="stage === 'detecting'" class="flow-title">正在检测环境…</p>
-
-        <!-- Node 缺失 / 版本过低 -->
-        <div v-if="stage === 'node'">
-          <p class="flow-title">
-            {{ env?.found ? `当前 Node 版本过低（${env?.version}）` : "未检测到 Node.js" }}
-          </p>
-          <p class="hint">DeepSeek Harness 需要 Node.js ≥ 22.19.0。请选择一种安装方式：</p>
-          <div class="flow-actions">
-            <button
-              v-if="env?.nvmFound"
-              class="primary"
-              :disabled="installingNode"
-              @click="installNodeNvm"
-            >
-              {{ installingNode ? "正在安装…" : "用 nvm 安装 Node 22" }}
-            </button>
-            <button
-              class="primary"
-              :disabled="installingNode"
-              @click="env?.found ? upgradeNode() : installNode()"
-            >
-              {{
-                installingNode
-                  ? "正在安装…"
-                  : env?.found
-                    ? platform === "windows"
-                      ? "一键升级（winget）"
-                      : "一键升级 Node"
-                    : platform === "windows"
-                      ? "一键安装（winget）"
-                      : "一键安装 Node 22"
-              }}
-            </button>
-            <button :disabled="installingNode" @click="installNodePortable">
-              自定义安装目录…
-            </button>
-          </div>
-          <p v-if="env?.nvmFound" class="hint good">已检测到 nvm（{{ env.nvmPath }}）</p>
-          <p v-if="platform === 'macos'" class="hint">
-            鲸仔将下载 Node.js 22 官方安装包到「~/Library/Application
-            Support」，无需管理员权限。
-          </p>
-        </div>
-
-        <!-- 安装 dsh -->
-        <div v-if="stage === 'dsh'">
-          <p class="flow-title">正在安装 DeepSeek Harness…</p>
-          <div class="progress-track">
-            <div class="progress-bar"></div>
-          </div>
-          <p class="hint">{{ stageText[installStage] ?? "准备中…" }}</p>
-        </div>
-
-        <!-- 启动服务器 -->
-        <div v-if="stage === 'server'">
-          <p class="flow-title">正在启动服务器…</p>
-          <div class="progress-track">
-            <div class="progress-bar"></div>
-          </div>
-          <p class="hint">首次启动可能需要一点时间，请稍候…</p>
-        </div>
-
-        <p v-if="flowError" class="banner error">{{ flowError }}</p>
-        <p v-if="busy" class="banner busy">⏳ {{ busy }}</p>
-        <p v-if="error && stage !== 'node'" class="banner error">{{ error }}</p>
-
-        <div v-if="flowError" class="flow-actions">
-          <button class="primary" @click="runFlow">重试</button>
-          <button class="ghost" @click="goPanel">进入高级面板</button>
-        </div>
-
-        <button v-if="stage === 'node' || stage === 'detecting'" class="ghost link" @click="goPanel">
-          进入高级面板
-        </button>
-      </div>
+      </template>
     </div>
 
-    <!-- 高级/管理面板 -->
+    <!-- 鲸仔管理后台 -->
     <template v-else>
       <header class="topbar">
         <div class="brand">
-          <span class="dot" :class="phaseClass"></span>
+          <img class="brand-logo" src="/logo.png" alt="鲸仔" />
           <div>
-            <h1>鲸仔</h1>
+            <h1>鲸仔管理后台</h1>
             <p class="sub en">Whalito</p>
             <p class="sub">一键安装 · 启动 · 管理你的 Harness</p>
           </div>
@@ -1072,6 +1310,19 @@ function autoScroll() {
           <button class="ghost" @click="showSettings = true">设置</button>
         </div>
       </header>
+
+      <!-- 状态总览：Node / Harness / 服务器 一眼看清 -->
+      <div class="overview">
+        <div
+          v-for="item in overviewItems"
+          :key="item.label"
+          class="overview-item"
+          :class="item.state"
+        >
+          <span class="overview-title">{{ item.label }}</span>
+          <span class="overview-value">{{ item.text }}</span>
+        </div>
+      </div>
 
       <div v-if="installingNode || installingDsh" class="progress-track">
         <div class="progress-bar"></div>
@@ -1082,97 +1333,22 @@ function autoScroll() {
       <p v-if="notice" class="banner notice">{{ notice }}</p>
       <p v-if="busy" class="banner busy">⏳ {{ busy }}</p>
 
-      <section class="grid">
-        <div class="card">
-          <h2>① 环境检测</h2>
-          <ul class="kv">
-            <li>
-              <span>Node.js</span>
-              <b :class="env?.found ? 'ok' : 'bad'">{{ env?.found ? `已安装 ${env?.version}` : "未检测到" }}</b>
-            </li>
-            <li v-if="env?.nodeTooOld">
-              <span>版本要求</span>
-              <b class="bad">需要 ≥ 22.19.0</b>
-            </li>
-            <li>
-              <span>安装路径</span>
-              <code>{{ env?.nodePath ?? "—" }}</code>
-            </li>
-            <li v-if="env?.nvmFound">
-              <span>nvm</span>
-              <code>{{ env?.nvmPath }}</code>
-            </li>
-          </ul>
-          <div class="row">
-            <button @click="refreshEnv">重新检测</button>
-            <button v-if="env && !env.found" class="primary" :disabled="installingNode" @click="installNode">
-              {{ installingNode ? "正在安装中…" : "一键安装 Node.js" }}
-            </button>
-            <button v-else-if="env?.nodeTooOld" class="primary" :disabled="installingNode" @click="upgradeNode">
-              {{ installingNode ? "正在升级中…" : "升级 Node.js" }}
-            </button>
-            <button :disabled="installingNode" @click="installNodePortable">自定义安装目录…</button>
-          </div>
-        </div>
-
-        <div class="card">
-          <h2>② DeepSeek Harness</h2>
-          <ul class="kv">
-            <li>
-              <span>安装状态</span>
-              <b :class="env?.dshInstalled ? 'ok' : 'bad'">
-                {{ env?.dshInstalled ? `已安装 ${env?.dshVersion ?? ""}` : "未安装" }}
-              </b>
-            </li>
-            <li>
-              <span>npm 全局前缀</span>
-              <code>{{ env?.npmPrefix ?? "—" }}</code>
-            </li>
-            <li>
-              <span>安装目录</span>
-              <code>{{ env?.installPrefix ?? "—" }}</code>
-            </li>
-          </ul>
-          <p v-if="updateAvailable" class="hint update">发现新版本 {{ latestVersion }}（当前 {{ env?.dshVersion }}）</p>
-          <p v-else-if="isLatest" class="hint good">当前已是最新版本（{{ latestVersion }}）</p>
-          <p class="hint">Harness 安装到程序独立目录（见“安装目录”），与系统全局 npm 隔离，更稳定。</p>
-          <div class="row">
-            <button v-if="env && !env.dshInstalled" class="primary" :disabled="installingDsh" @click="installDsh">
-              {{ installingDsh ? "正在安装中…" : "安装 Harness" }}
-            </button>
-            <template v-else>
-              <button v-if="updateAvailable" class="primary" :disabled="installingDsh" @click="updateDsh">
-                {{ installingDsh ? "正在更新中…" : `更新到 ${latestVersion}` }}
-              </button>
-              <button v-else :disabled="checkingUpdate" @click="checkLatest(true)">
-                {{ checkingUpdate ? "检查中…" : "检查更新" }}
-              </button>
-            </template>
-            <button :disabled="verifying" @click="verifyDsh">{{ verifying ? "校验中…" : "校验安装" }}</button>
-          </div>
-        </div>
-
-        <div class="card">
-          <h2>③ 服务器</h2>
-          <div class="status-line">
-            <span class="dot big" :class="phaseClass"></span>
-            <span class="phase">{{ serverPhaseText }}</span>
-            <code v-if="server.url" class="url">{{ server.url }}</code>
-          </div>
-          <div class="row">
-            <button v-if="server.phase === 'stopped'" class="primary" @click="startServer">启动服务器</button>
-            <button v-else-if="server.phase === 'error'" class="primary" @click="startServer">重新启动</button>
-            <button v-else class="danger" @click="stopServer">
-              {{ server.phase === "external" && confirmingStop ? "再次点击确认停止" : "停止服务器" }}
-            </button>
-            <button v-if="server.phase === 'external' && confirmingStop" class="ghost" @click="confirmingStop = false">取消</button>
-            <button v-if="server.phase === 'running' || server.phase === 'external'" class="ghost" @click="restartServer">重启服务器</button>
-            <button v-if="server.url" class="primary" @click="openEmbedded">应用内打开</button>
-            <button v-if="server.url" @click="openUrl">在浏览器打开</button>
-          </div>
-          <p v-if="server.phase === 'external'" class="hint warn">该服务器由外部启动；点击「停止服务器」将按端口定位并结束对应进程（需二次确认）。</p>
-        </div>
-      </section>
+      <!-- 服务器操作工具栏（去卡片化后保留的高频操作） -->
+      <div class="server-tools">
+        <button v-if="server.phase === 'stopped'" class="primary" @click="startServer">启动服务器</button>
+        <button v-else-if="server.phase === 'error'" class="primary" @click="startServer">重新启动</button>
+        <button v-else class="danger" @click="stopServer">
+          {{ server.phase === "external" && confirmingStop ? "再次点击确认停止" : "停止服务器" }}
+        </button>
+        <button v-if="server.phase === 'external' && confirmingStop" class="ghost" @click="confirmingStop = false">取消</button>
+        <button v-if="server.phase === 'running' || server.phase === 'external'" class="ghost" @click="restartServer">重启服务器</button>
+        <button v-if="server.url" class="primary" @click="openEmbedded">应用内打开</button>
+        <button v-if="server.url" @click="openUrl">在浏览器打开</button>
+        <button v-if="server.url" @click="copyServerUrl">复制地址</button>
+      </div>
+      <p v-if="server.phase === 'external'" class="hint warn">
+        该服务器由外部启动；点击「停止服务器」将按端口定位并结束对应进程（需二次确认）。
+      </p>
 
       <div v-if="showSettings && settings" class="modal-backdrop" @click.self="showSettings = false">
         <div class="modal">
@@ -1232,13 +1408,36 @@ function autoScroll() {
 
       <section class="card logs">
         <div class="logs-head">
-          <h2>运行日志</h2>
-          <button class="ghost small" @click="clearLogs">清空</button>
+          <h2>运行日志<span v-if="logs.length" class="logs-count">（共 {{ logs.length }} 条）</span></h2>
+          <div class="row">
+            <button class="ghost small" @click="refreshLogs">刷新</button>
+            <button class="ghost small" @click="clearLogs">清空</button>
+          </div>
         </div>
         <div ref="logBox" class="logbox">
           <div v-if="logs.length === 0" class="empty">暂无日志</div>
           <div v-for="(l, i) in logs" :key="i" class="line">{{ l }}</div>
         </div>
+      </section>
+
+      <section class="card about">
+        <div class="about-head">
+          <h2>关于</h2>
+          <span class="about-version">
+            鲸仔 Whalito v{{ whalitoVer?.current ?? "—" }}{{ whalitoVer?.testBuild ? "（测试版）" : "" }}
+          </span>
+        </div>
+        <div class="row">
+          <button class="primary" @click="runFlow">重新运行安装引导</button>
+          <button
+            class="ghost"
+            @click="invoke('open_url', { url: 'https://github.com/entireyu/dsh-whalito-desk' }).catch(() => {})"
+          >
+            GitHub 项目主页
+          </button>
+          <button class="ghost" @click="hideToTray">隐藏到托盘</button>
+        </div>
+        <p class="hint">Node / Harness 安装、升级、切换与校验统一由「安装引导」自动检测处理；关闭窗口即隐藏到托盘。</p>
       </section>
     </template>
   </div>
@@ -1270,14 +1469,45 @@ function autoScroll() {
     </div>
   </div>
 
-  <!-- 鲸仔自更新全屏遮罩：下载/安装进度可见，直到应用退出并由安装链重启 -->
-  <div v-if="whalitoUpdating" class="update-overlay">
-    <div class="update-overlay-card">
-      <p class="update-overlay-title">鲸仔正在更新…</p>
-      <div class="progress-track">
-        <div class="progress-bar"></div>
+  <!-- 后台发现的更新提示弹窗（每小时检查；含当前/最新版本与更新日志） -->
+  <div v-if="currentUpdateNotice" class="modal-backdrop">
+    <div class="modal notice-modal">
+      <div class="modal-head">
+        <h2>发现新版本</h2>
+        <span class="notice-badge">{{ currentUpdateNotice.target === "whalito" ? "鲸仔" : "Harness" }}</span>
       </div>
-      <p class="update-overlay-hint">{{ whalitoUpdateMessage }}</p>
+      <p class="notice-target">
+        {{ currentUpdateNotice.target === "whalito" ? "鲸仔 Whalito" : "DeepSeek Harness" }}
+        有新版本可用
+      </p>
+      <ul class="notice-versions">
+        <li><span>当前版本</span><code>{{ currentUpdateNotice.current }}</code></li>
+        <li><span>最新版本</span><code>{{ currentUpdateNotice.latest }}</code></li>
+      </ul>
+      <div class="notice-changelog">
+        <p class="notice-changelog-title">更新日志</p>
+        <pre>{{
+          currentUpdateNotice.changelog ||
+          `新版本 ${currentUpdateNotice.latest} 已发布，点击「立即更新」即可升级。`
+        }}</pre>
+      </div>
+      <a
+        v-if="currentUpdateNotice.url"
+        class="notice-link"
+        href="#"
+        @click.prevent="openNoticeUrl"
+      >查看详情 ↗</a>
+      <div class="row notice-actions">
+        <button class="ghost" @click="snoozeUpdate">暂不更新（24 小时内不再提醒）</button>
+        <button class="primary" @click="updateFromPopup">立即更新</button>
+      </div>
     </div>
   </div>
+
+  <!-- 鲸仔自更新：全屏统一 loading，直到应用退出并由安装链重启 -->
+  <LoadingScreen
+    v-if="whalitoUpdating"
+    status="鲸仔更新中"
+    :detail="whalitoUpdateMessage"
+  />
 </template>

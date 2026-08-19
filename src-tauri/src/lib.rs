@@ -117,6 +117,7 @@ pub fn run() {
             commands::install_node,
             commands::upgrade_node,
             commands::install_node_nvm,
+            commands::switch_node_nvm,
             commands::install_node_portable,
             commands::pick_node_dir,
             commands::pick_directory,
@@ -145,6 +146,8 @@ pub fn run() {
             update::whalito_version_info,
             update::whalito_check_update,
             update::whalito_apply_update,
+            update::whalito_update_result,
+            update::snooze_update,
             pet::pet_status,
             pet::pet_open_session,
             pet::pet_respond,
@@ -221,6 +224,35 @@ pub fn run() {
 
             // 启动桌宠状态读取器（长生命周期后台线程）。
             pet::spawn(handle.clone());
+
+            // 后台每小时更新检查：DSH / 鲸仔任一有新版本（且未在 24h 静默期）时，
+            // 唤起主窗口并弹「更新提示」（含当前/最新版本与更新日志）。
+            // 放在 Rust 侧线程而非前端 setInterval：窗口隐藏/后台节流时仍可靠。
+            {
+                let update_handle = handle.clone();
+                std::thread::spawn(move || {
+                    // 首次检查延迟 60 秒，避开启动阶段的安装/更新流程。
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    loop {
+                        if update_handle
+                            .state::<AppState>()
+                            .quitting
+                            .load(Ordering::SeqCst)
+                        {
+                            break;
+                        }
+                        let notices = crate::update::check_update_notices(&update_handle);
+                        if !notices.is_empty() {
+                            // 窗口可能隐藏（托盘）：先唤起再弹窗。
+                            show_main(&update_handle);
+                            for n in notices {
+                                let _ = update_handle.emit("update-available", n);
+                            }
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(60 * 60));
+                    }
+                });
+            }
 
             if !autostart_flag {
                 show_main(&handle);

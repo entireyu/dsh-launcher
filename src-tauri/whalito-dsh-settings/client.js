@@ -315,6 +315,54 @@
         };
       }
 
+      // 接管 DSH 的剪贴板写入：内嵌 iframe（WebView2）里
+      // navigator.clipboard.writeText 常因焦点/权限策略失败，导致 DSH 里所有
+      // 「复制」按钮（消息 / 代码块 / 搜索结果 / 表格 / JSON）点了没反应。
+      // 包装为：原生优先；失败则上行 clipboard-set，由鲸仔主窗口经 Rust
+      // 写入系统剪贴板（与右键菜单复制同一链路）。patch 后始终 resolve，
+      // DSH 侧的 await（writeClipboard / useCopyFeedback / JsonTree）会显示
+      // 「复制成功」而非「复制失败」。
+      if (window.parent !== window) {
+        var bridgeWriteText = function (text) {
+          return new Promise(function (resolve) {
+            try {
+              postToParent({
+                channel: CHANNEL,
+                type: 'action',
+                action: 'clipboard-set',
+                text: String(text),
+              });
+            } catch (e) {
+              /* 父窗口已关闭：忽略 */
+            }
+            resolve();
+          });
+        };
+        if (navigator.clipboard) {
+          var origWriteText = typeof navigator.clipboard.writeText === 'function'
+            ? navigator.clipboard.writeText.bind(navigator.clipboard)
+            : null;
+          navigator.clipboard.writeText = function (text) {
+            if (origWriteText) {
+              try {
+                return Promise.resolve(origWriteText(text)).catch(function () {
+                  return bridgeWriteText(text);
+                });
+              } catch (e) {
+                return bridgeWriteText(text);
+              }
+            }
+            return bridgeWriteText(text);
+          };
+        } else {
+          // 极少数无 Clipboard API 的环境：直接注入桥实现。
+          Object.defineProperty(navigator, 'clipboard', {
+            configurable: true,
+            value: { writeText: bridgeWriteText },
+          });
+        }
+      }
+
       // ---- 内联样式（中性色 + currentColor，适配明暗主题） ----
       var styles = {
         root: { display: 'flex', flexDirection: 'column', gap: '16px', fontSize: '13px', lineHeight: 1.5 },
@@ -482,8 +530,14 @@
             } else if (data.type === 'update-progress') {
               updateStage[1](typeof data.message === 'string' ? data.message : '');
             } else if (data.type === 'error') {
+              // 失败时复位所有进行中状态：检查/更新按钮不再卡在「检查中…」「更新中…」，
+              // 进度文案不再残留「正在下载更新…」之类的假更新提示（鲸仔自更新下载失败后
+              // 设置分区仍显示「正在更新」的根因——此前只清了 checking，漏了 updating /
+              // updateStage，而父窗口失败路径不会补发 hello 快照来复位）。
               notice[1](typeof data.message === 'string' ? data.message : '鲸仔操作失败');
               checking[1]('');
+              updating[1]('');
+              updateStage[1]('');
             }
           }
           window.addEventListener('message', onMessage);
@@ -728,7 +782,7 @@
               key: 'focus-panel',
               style: styles.btn,
               onClick: function () { sendAction('focus-panel'); },
-            }, '返回鲸仔助手'),
+            }, '进入鲸仔管理后台'),
           ]),
           h('label', { key: 'port', style: styles.field }, [
             h('span', { key: 'port-label', style: styles.label }, '端口'),

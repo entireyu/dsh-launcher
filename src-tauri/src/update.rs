@@ -7,9 +7,10 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::state;
 use crate::state::{parse_semver, push_log, AppState, TEST_BUILD};
 
 /// GitHub 仓库 API（发布源）。
@@ -30,11 +31,50 @@ pub struct WhalitoVersionInfo {
     pub url: Option<String>,
 }
 
-/// 最新发布信息（版本 + 资产列表 + 发布页地址）。
+/// 后台更新弹窗通知：目标 + 当前/最新版本 + 更新日志 + 详情链接。
+/// 由每小时的后台检查生成，经 `update-available` 事件发给主窗口。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateNotice {
+    /// "dsh" | "whalito"
+    pub target: String,
+    pub current: String,
+    pub latest: String,
+    /// 更新日志（whalito 来自 GitHub release body；DSH 无可靠来源时为 None）。
+    pub changelog: Option<String>,
+    pub url: Option<String>,
+}
+
+/// 静默期：暂不更新后 24 小时内不再提醒。
+pub const SNOOZE_MILLIS: u64 = 24 * 60 * 60 * 1000;
+
+/// 更新标记（持久化在配置目录）：更新链启动前写入目标版本，
+/// 应用重启后对比当前版本判断更新是否成功。
+#[derive(Serialize, Deserialize, Clone)]
+pub struct UpdateMarker {
+    pub from: String,
+    pub to: String,
+}
+
+/// 更新结果（重启后读标记得到，一次性消费）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateMarkerResult {
+    /// 当前运行版本 == 标记目标版本 → true（更新成功）。
+    pub success: bool,
+    pub from: String,
+    pub to: String,
+}
+
+/// DSH 包主页（无独立更新日志来源时作为详情链接）。
+const DSH_HOMEPAGE: &str = "https://github.com/deepseek-ai/deepseek-harness#readme";
+
+/// 最新发布信息（版本 + 资产列表 + 发布页地址 + 发布说明）。
 struct ReleaseInfo {
     version: String,
     assets: Vec<AssetInfo>,
     url: Option<String>,
+    body: Option<String>,
 }
 
 #[derive(Clone)]
@@ -92,10 +132,130 @@ pub fn whalito_check_update() -> Result<WhalitoVersionInfo, String> {
     })
 }
 
-/// 一键更新：检查 → 选资产 → 下载 → 静默安装 → 退出并由安装链重启应用。
+/// 当前 Unix 毫秒时间戳。
+pub fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 后台每小时调用的更新检查：汇总 DSH 与鲸仔的可用更新（含更新日志），
+/// 跳过处于静默期（暂不更新）的目标；单个来源网络失败只跳过该目标，不影响其余。
+pub fn check_update_notices(app: &AppHandle) -> Vec<UpdateNotice> {
+    let snooze = state::load_update_snooze(app);
+    let now = now_millis();
+    let mut out = Vec::new();
+
+    // —— 鲸仔 ——
+    let whalito_snoozed = snooze.whalito.map(|t| t > now).unwrap_or(false);
+    if !whalito_snoozed {
+        if let Ok(info) = fetch_release_info() {
+            let current = current_version();
+            // 与设置分区语义一致：仅当有匹配当前变体的安装包资产才提示
+            //（测试构建不上传 GitHub，无资产则不打扰）。
+            if is_update_available(&current, &info.version)
+                && pick_asset_for(&info.assets, platform_str(), TEST_BUILD).is_some()
+            {
+                out.push(UpdateNotice {
+                    target: "whalito".into(),
+                    current,
+                    latest: info.version.clone(),
+                    changelog: info.body,
+                    url: info.url,
+                });
+            }
+        }
+    }
+
+    // —— DSH ——
+    let dsh_snoozed = snooze.dsh.map(|t| t > now).unwrap_or(false);
+    if !dsh_snoozed {
+        let st = app.state::<AppState>();
+        let (node_dir, registry, channel) = {
+            let s = st.settings.lock().unwrap();
+            (
+                s.node_dir.clone(),
+                s.registry.clone(),
+                state::normalize_dsh_channel(&s.dsh_channel).to_string(),
+            )
+        };
+        let env = state::detect_env(node_dir.as_deref());
+        if let Some(current) = env.dsh_version {
+            if let Some(latest) =
+                crate::commands::latest_dsh_version(node_dir, &registry, &channel)
+            {
+                // DSH 是 pre-release 版本号（如 0.1.0-rc.7），纯 semver 三元组
+                // 比较会把它们判为相等，这里沿用设置分区「字符串不等」语义。
+                if latest.trim() != current.trim() {
+                    out.push(UpdateNotice {
+                        target: "dsh".into(),
+                        current: current.trim().to_string(),
+                        latest: latest.trim().to_string(),
+                        changelog: dsh_changelog(latest.trim()),
+                        url: Some(DSH_HOMEPAGE.to_string()),
+                    });
+                }
+            }
+        }
+    }
+
+    out
+}
+
+/// DSH 更新日志（best-effort）：deepseek-harness 仓库 GitHub release 的 body。
+/// npm 包 readme 为空、仓库也只在个别版本发布说明——匹配不到返回 None（前端显示占位文案）。
+fn dsh_changelog(latest: &str) -> Option<String> {
+    const RELEASES_URL: &str =
+        "https://api.github.com/repos/deepseek-ai/deepseek-harness/releases?per_page=10";
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(10))
+        .build();
+    let body = agent
+        .get(RELEASES_URL)
+        .set("User-Agent", "whalito-update-check")
+        .call()
+        .ok()?
+        .into_string()
+        .ok()?;
+    let arr: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let arr = arr.as_array()?;
+    for rel in arr {
+        let tag = rel.get("tag_name")?.as_str()?;
+        // 优先 tag 剥 v 后精确匹配（dsh-v0.1.0-rc.7 → 0.1.0-rc.7），再退化为包含匹配。
+        let matched = strip_v(tag) == latest || tag.contains(latest);
+        if !matched {
+            continue;
+        }
+        let notes = rel.get("body")?.as_str()?.trim();
+        if !notes.is_empty() {
+            return Some(notes.to_string());
+        }
+    }
+    None
+}
+
+/// 目标静默 24 小时（弹窗「暂不更新」）：期间后台检查不再提示该目标。
+/// target: "dsh" / "whalito"。
 #[tauri::command]
-pub async fn whalito_apply_update(app: AppHandle) -> Result<(), String> {
-    if !confirm_update(&app).await? {
+pub fn snooze_update(app: AppHandle, target: String) -> Result<(), String> {
+    let mut snooze = state::load_update_snooze(&app);
+    let until = now_millis() + SNOOZE_MILLIS;
+    match target.as_str() {
+        "dsh" => snooze.dsh = Some(until),
+        "whalito" => snooze.whalito = Some(until),
+        _ => return Err(format!("未知更新目标：{target}")),
+    }
+    state::save_update_snooze(&app, &snooze)?;
+    Ok(())
+}
+
+/// 一键更新：检查 → 选资产 → 下载 → 静默安装 → 退出并由安装链重启应用。
+/// `skip_confirm`：弹窗「立即更新」已构成确认，传入 true 跳过原生确认对话框；
+/// 设置分区等既有调用不传，仍走原生确认。
+#[tauri::command]
+pub async fn whalito_apply_update(app: AppHandle, skip_confirm: Option<bool>) -> Result<(), String> {
+    if !skip_confirm.unwrap_or(false) && !confirm_update(&app).await? {
         return Ok(());
     }
     emit(&app, "正在获取最新版本…");
@@ -116,9 +276,69 @@ pub async fn whalito_apply_update(app: AppHandle) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())??;
     emit(&app, "已开始安装，应用即将重启…");
+    // 先写更新标记（目标版本），重启后据此校验是否更新成功；写失败不阻断更新。
+    write_update_marker(&app, &current, &info.version);
     spawn_update_chain(&dest)?;
     app.exit(0);
     Ok(())
+}
+
+/// 更新标记文件路径（应用配置目录，与 config.json 同目录）。
+fn update_marker_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    Ok(dir.join("update_marker.json"))
+}
+
+/// 写更新标记：应用退出前记录「从 from 更新到 to」。
+/// 失败只记日志，不阻断更新流程（无标记则重启后不校验、不提示）。
+fn write_update_marker(app: &AppHandle, from: &str, to: &str) {
+    let marker = UpdateMarker {
+        from: from.to_string(),
+        to: to.to_string(),
+    };
+    let path = match update_marker_path(app) {
+        Ok(p) => p,
+        Err(e) => {
+            push_log(&app.state::<AppState>().logs, &format!("[系统] 更新标记路径失败：{e}"));
+            return;
+        }
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            push_log(&app.state::<AppState>().logs, &format!("[系统] 更新标记目录创建失败：{e}"));
+            return;
+        }
+    }
+    match serde_json::to_string(&marker) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                push_log(&app.state::<AppState>().logs, &format!("[系统] 更新标记写入失败：{e}"));
+            }
+        }
+        Err(e) => push_log(&app.state::<AppState>().logs, &format!("[系统] 更新标记序列化失败：{e}")),
+    }
+}
+
+/// 更新是否成功：当前运行版本与标记目标版本一致（容忍首尾空白）。
+pub fn update_succeeded(current: &str, to: &str) -> bool {
+    to.trim() == current
+}
+
+/// 读取并消费更新标记（应用重启后调用一次）：
+/// 对比当前运行版本与标记目标版本，得出更新是否成功；无论结果如何都删除标记，
+/// 保证只提示一次。无标记返回 None（正常启动）。
+#[tauri::command]
+pub fn whalito_update_result(app: AppHandle) -> Option<UpdateMarkerResult> {
+    let path = update_marker_path(&app).ok()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let marker: UpdateMarker = serde_json::from_str(&text).ok()?;
+    let _ = std::fs::remove_file(&path);
+    let success = update_succeeded(&current_version(), &marker.to);
+    Some(UpdateMarkerResult {
+        success,
+        from: marker.from,
+        to: marker.to,
+    })
 }
 
 /// 更新确认对话框。window.confirm 在 WebView2 中不可用（默认脚本对话框只支持
@@ -332,6 +552,7 @@ fn fetch_release_info() -> Result<ReleaseInfo, String> {
                 version: first,
                 assets: Vec::new(),
                 url: None,
+                body: None,
             })
         }
         Err(e) => Err(format!("检查更新失败：{e}")),
@@ -359,6 +580,12 @@ fn parse_release_json(body: &str) -> Result<ReleaseInfo, String> {
         .map(strip_v)
         .unwrap_or_else(|| "0.0.0".to_string());
     let url = v.get("html_url").and_then(|u| u.as_str()).map(String::from);
+    // GitHub release body 即发布说明（更新日志），空串视为无。
+    let body = v
+        .get("body")
+        .and_then(|b| b.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let assets = v
         .get("assets")
         .and_then(|a| a.as_array())
@@ -377,6 +604,7 @@ fn parse_release_json(body: &str) -> Result<ReleaseInfo, String> {
         version,
         assets,
         url,
+        body,
     })
 }
 
@@ -419,6 +647,40 @@ mod tests {
     fn strips_v_prefix() {
         assert_eq!(strip_v("v0.2.0"), "0.2.0");
         assert_eq!(strip_v("0.2.0"), "0.2.0");
+    }
+
+    #[test]
+    fn update_succeeded_compares_versions() {
+        assert!(update_succeeded("0.4.4", "0.4.4"));
+        assert!(update_succeeded("0.4.4", " 0.4.4 "));
+        assert!(!update_succeeded("0.4.4", "0.4.5"));
+        assert!(!update_succeeded("0.4.4", ""));
+    }
+
+    #[test]
+    fn parse_release_json_captures_body() {
+        // body 以 markdown 标题 `## ` 开头，raw string 定界符需多于两个 #。
+        let json = r###"{
+            "tag_name": "v0.4.4",
+            "html_url": "https://github.com/entireyu/dsh-whalito-desk/releases/tag/v0.4.4",
+            "body": "## [0.4.4] - 2026-08-18\n### 修复\n- 一些修复",
+            "assets": [
+                {"name": "Whalito_0.4.4_x64-setup.exe", "browser_download_url": "u1"},
+                {"name": "Whalito-Test_0.4.4_x64-setup.exe", "browser_download_url": "u2"}
+            ]
+        }"###;
+        let info = parse_release_json(json).unwrap();
+        assert_eq!(info.version, "0.4.4");
+        assert_eq!(info.assets.len(), 2);
+        assert!(info.body.as_deref().unwrap().contains("一些修复"));
+    }
+
+    #[test]
+    fn parse_release_json_tolerates_missing_or_empty_body() {
+        let no_body = r#"{"tag_name": "v0.4.4", "assets": []}"#;
+        assert!(parse_release_json(no_body).unwrap().body.is_none());
+        let empty_body = r#"{"tag_name": "v0.4.4", "body": "   ", "assets": []}"#;
+        assert!(parse_release_json(empty_body).unwrap().body.is_none());
     }
 
     #[test]

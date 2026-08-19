@@ -52,6 +52,23 @@ body {
   gap: 12px;
 }
 
+/* 品牌 logo（管理后台 / 引导流程卡片） */
+.brand-logo {
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.flow-brand-logo {
+  width: 44px;
+  height: 44px;
+  border-radius: 11px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
 .brand h1 {
   margin: 0;
   font-size: 20px;
@@ -99,18 +116,6 @@ body {
   background: var(--muted);
 }
 
-.grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
-}
-
-@media (max-width: 820px) {
-  .grid {
-    grid-template-columns: 1fr;
-  }
-}
-
 .card {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -126,33 +131,113 @@ body {
   letter-spacing: 0.5px;
 }
 
-.kv {
-  list-style: none;
-  margin: 0 0 14px;
-  padding: 0;
+/* 管理后台：顶部状态总览条（Node / Harness / 服务器，纯展示） */
+.overview {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+@media (max-width: 820px) {
+  .overview {
+    grid-template-columns: 1fr;
+  }
+}
+
+.overview-item {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  align-items: flex-start;
+  gap: 5px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  color: inherit;
+  font-size: 13px;
 }
 
-.kv li {
+.overview-title {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.kv li > span {
+  gap: 6px;
+  font-size: 12px;
   color: var(--muted);
 }
 
-.kv code {
-  background: var(--panel-2);
-  padding: 2px 6px;
-  border-radius: 6px;
-  font-size: 12px;
+/* 状态点（复用 dot 色系） */
+.overview-title::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+
+.overview-item.ok .overview-title::before {
+  background: var(--ok);
+  box-shadow: 0 0 6px var(--ok);
+}
+
+.overview-item.warn .overview-title::before {
+  background: var(--warn);
+}
+
+.overview-item.bad .overview-title::before {
+  background: var(--bad);
+}
+
+.overview-value {
+  font-size: 13px;
+  font-weight: 600;
   word-break: break-all;
-  text-align: right;
+}
+
+/* 管理后台：服务器操作工具栏（去卡片化后保留的高频操作，一行按钮） */
+.server-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+/* 运行日志条数 */
+.logs-count {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+/* 关于区（版本 / GitHub / 隐藏到托盘 / 重新安装引导） */
+.about {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.about-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.about-head h2 {
+  margin: 0;
+}
+
+.about-version {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.about .hint {
+  margin: 0;
 }
 
 .ok {
@@ -233,17 +318,6 @@ button.small {
   background: rgba(79, 140, 255, 0.12);
   color: var(--accent);
   border: 1px solid rgba(79, 140, 255, 0.35);
-}
-
-.status-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 14px;
-}
-
-.status-line .phase {
-  font-weight: 600;
 }
 
 .url {
@@ -494,32 +568,81 @@ button.link {
   color: var(--muted);
 }
 
-/* DSH 更新中的内嵌页 loading：居中卡片，替代「服务器未运行」 */
-.embed-updating {
-  position: absolute;
+/* 全屏统一 loading（检测/安装/启动/更新/重启共用）：
+   居中 logo → 鲸仔 Whalito → DeepSeek Harness 桌面版 → 进度条 → 状态文字 */
+.loading-screen {
+  position: fixed;
   inset: 0;
+  z-index: 1500;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 14px;
   padding: 20px;
+  background: var(--bg);
 }
 
-.embed-updating-title {
-  margin: 0;
-  font-size: 16px;
+.loading-logo {
+  width: 88px;
+  height: 88px;
+  border-radius: 20px;
+  object-fit: contain;
+}
+
+.loading-name {
+  margin: 4px 0 0;
+  font-size: 20px;
   font-weight: 600;
 }
 
-.embed-updating .progress-track {
-  width: 100%;
-  max-width: 360px;
+.loading-name-en {
+  color: var(--muted);
+  font-weight: 400;
 }
 
-.embed-updating .hint {
+.loading-sub {
   margin: 0;
-  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.loading-track {
+  width: 100%;
+  max-width: 320px;
+  height: 4px;
+  background: var(--panel-2);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+
+.loading-bar {
+  height: 100%;
+  width: 40%;
+  background: var(--accent);
+  border-radius: 2px;
+  animation: progress-slide 1.2s ease-in-out infinite;
+}
+
+.loading-status {
+  margin: 6px 0 0;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.loading-detail {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 全屏 loading 期间右下角「进入鲸仔管理后台」入口 */
+.flow-exit {
+  position: fixed;
+  right: 18px;
+  bottom: 14px;
+  z-index: 1600;
 }
 
 /* 内嵌 DSH 页面右键自定义菜单 */
@@ -609,42 +732,92 @@ button.link {
   cursor: pointer;
 }
 
-/* 鲸仔自更新全屏遮罩：覆盖整个主窗口，展示下载/安装进度直到应用重启 */
-.update-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 2000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  background: rgba(15, 17, 21, 0.9);
+/* 后台更新提示弹窗（每小时检查发现新版本） */
+
+/* 后台更新提示弹窗（每小时检查发现新版本） */
+.notice-modal {
+  max-width: 540px;
 }
 
-.update-overlay-card {
-  width: 100%;
-  max-width: 360px;
+.notice-badge {
+  font-size: 12px;
+  color: #4f8cff;
+  border: 1px solid #4f8cff;
+  border-radius: 999px;
+  padding: 1px 10px;
+}
+
+.notice-target {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.notice-versions {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 24px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  gap: 6px;
 }
 
-.update-overlay-title {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-  text-align: center;
-}
-
-.update-overlay-hint {
-  margin: 0;
-  color: var(--muted);
+.notice-versions li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   font-size: 13px;
-  text-align: center;
+}
+
+.notice-versions span {
+  color: var(--muted);
+  width: 68px;
+  flex-shrink: 0;
+}
+
+.notice-versions code {
+  background: rgba(127, 127, 127, 0.12);
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-size: 12.5px;
+}
+
+.notice-changelog {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.notice-changelog-title {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.notice-changelog pre {
+  margin: 0;
+  max-height: 32vh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: inherit;
+}
+
+.notice-link {
+  display: inline-block;
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: #4f8cff;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.notice-actions {
+  justify-content: flex-end;
+  margin-top: 2px;
 }
 

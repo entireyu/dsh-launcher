@@ -460,19 +460,40 @@ fn spawn_update_chain(dest: &Path) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        // .app 包名 = 可执行文件名（productName 与卷名同源，dmg 卷内同名 .app）。
-        let app_name = exe
+        // macOS：current_exe() 指向 <...>/Whalito.app/Contents/MacOS/Whalito，
+        // 必须向上找到 .app 包根目录，安装目录 = 包根目录的父目录（如 /Applications）。
+        // 修复：旧实现误用 exe.parent()（Contents/MacOS）作为安装目录，导致
+        // 「rm -rf 清不掉旧包、ditto 把新包拷进旧包内部的 Contents/MacOS/Whalito.app」，
+        // 最终 open 重启的还是旧二进制——版本永远不变，还留下嵌套垃圾包。
+        let bundle_root = std::iter::successors(exe.parent(), |p| p.parent())
+            .find(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("app"))
+            })
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                format!(
+                    "无法定位 .app 应用包目录（当前程序路径：{}）",
+                    exe.display()
+                )
+            })?;
+        // .app 包名 = 包根目录文件名（productName 与卷名同源，dmg 卷内同名 .app）。
+        let app_name = bundle_root
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "Whalito".to_string());
+        let app_dir = bundle_root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| dir.clone());
         let script = build_update_script();
         let script_path = std::env::temp_dir().join("whalito-update.sh");
         std::fs::write(&script_path, &script).map_err(|e| format!("写入更新脚本失败：{e}"))?;
         std::process::Command::new("/bin/sh")
             .arg(&script_path)
             .arg(dest)
-            .arg(&dir)
-            .arg(&exe)
+            .arg(&app_dir)
             .arg(&app_name)
             .spawn()
             .map_err(|e| format!("启动更新进程失败：{e}"))?;
@@ -485,25 +506,48 @@ fn spawn_update_chain(dest: &Path) -> Result<(), String> {
 }
 
 /// macOS 更新脚本模板（参数经位置变量传入，避免路径引号注入问题）：
-/// $1=dmg 路径，$2=当前 .app 所在目录，$3=应用可执行文件，$4=.app 包名。
+/// $1=dmg 路径，$2=.app 所在目录（如 /Applications），$3=.app 包名。
+/// 流程：等旧进程退出 → 去掉隔离属性 → 挂载 dmg（按制表符解析卷挂载点，
+/// 兼容卷名含空格）→ 新包先拷到同卷暂存目录 → 成功则原子替换并重启新版本；
+/// 任一环节失败则清理暂存、保留旧包并重启旧版本（不丢应用）。
+/// 执行日志写 /tmp/whalito-update.log 便于排查。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn build_update_script() -> String {
     [
         "#!/bin/sh",
         "set -u",
-        "DMG=\"$1\"; APPDIR=\"$2\"; APP=\"$3\"; APPNAME=\"$4\"",
+        "LOG=/tmp/whalito-update.log",
+        "log() { echo \"[$(date '+%Y-%m-%d %H:%M:%S')] $*\" >> \"$LOG\"; }",
+        "DMG=\"$1\"; APPDIR=\"$2\"; APPNAME=\"$3\"",
         // 等旧进程退出
-        "sleep 3",
+        "sleep 4",
         // 移除下载隔离属性（未公证版本，避免 Gatekeeper 二次拦截）
         "xattr -dr com.apple.quarantine \"$DMG\" 2>/dev/null",
-        // 挂载并解析卷挂载点
-        "MOUNT=$(hdiutil attach \"$DMG\" -nobrowse | awk '/\\/Volumes\\// {print $3}' | head -1)",
-        "[ -n \"$MOUNT\" ] || exit 1",
-        // 覆盖安装并重启
-        "rm -rf \"$APPDIR/$APPNAME.app\"",
-        "ditto \"$MOUNT/$APPNAME.app\" \"$APPDIR/$APPNAME.app\"",
-        "hdiutil detach \"$MOUNT\" -quiet",
-        "open \"$APP\"",
+        // 挂载并解析卷挂载点：hdiutil 输出为制表符分隔，取最后一列，兼容卷名含空格
+        "MOUNT=$(hdiutil attach \"$DMG\" -nobrowse 2>/dev/null | awk -F '\\t' '/\\/Volumes\\// {print $NF}' | head -1)",
+        "if [ -z \"$MOUNT\" ]; then log \"挂载 dmg 失败\"; exit 1; fi",
+        // 新版本先拷到同卷暂存目录，成功后原子替换，避免中途失败丢掉旧应用
+        "STAGE=\"$APPDIR/$APPNAME.new.app\"",
+        "rm -rf \"$STAGE\"",
+        "if ditto \"$MOUNT/$APPNAME.app\" \"$STAGE\"; then",
+        "  hdiutil detach \"$MOUNT\" -quiet 2>/dev/null",
+        // ditto 会保留源 xattr，这里再清一次暂存包的隔离属性，防止 Gatekeeper 拦截重启
+        "  xattr -dr com.apple.quarantine \"$STAGE\" 2>/dev/null",
+        "  rm -rf \"$APPDIR/$APPNAME.app\"",
+        "  if mv \"$STAGE\" \"$APPDIR/$APPNAME.app\"; then",
+        "    log \"安装完成，重启新版本\"",
+        "    open \"$APPDIR/$APPNAME.app\"",
+        "  else",
+        "    log \"替换应用包失败：$APPDIR/$APPNAME.app\"",
+        "    exit 1",
+        "  fi",
+        "else",
+        "  hdiutil detach \"$MOUNT\" -quiet 2>/dev/null",
+        "  rm -rf \"$STAGE\"",
+        "  log \"复制新版本失败，保留旧版本并重启\"",
+        "  open \"$APPDIR/$APPNAME.app\" 2>/dev/null || true",
+        "  exit 1",
+        "fi",
         "",
     ]
     .join("\n")
@@ -779,8 +823,15 @@ mod tests {
         assert!(s.starts_with("#!/bin/sh"));
         assert!(s.contains("xattr -dr com.apple.quarantine"));
         assert!(s.contains("hdiutil attach \"$DMG\" -nobrowse"));
-        assert!(s.contains("ditto \"$MOUNT/$APPNAME.app\" \"$APPDIR/$APPNAME.app\""));
+        // 挂载点按制表符取最后一列（兼容卷名含空格）
+        assert!(s.contains("awk -F '\\t' '/\\/Volumes\\// {print $NF}'"));
+        // 新包先拷到同卷暂存目录，成功后原子替换
+        assert!(s.contains("ditto \"$MOUNT/$APPNAME.app\" \"$STAGE\""));
+        assert!(s.contains("mv \"$STAGE\" \"$APPDIR/$APPNAME.app\""));
         assert!(s.contains("hdiutil detach \"$MOUNT\" -quiet"));
-        assert!(s.contains("open \"$APP\""));
+        // 重启走 .app 包（而非旧实现的裸可执行文件路径）
+        assert!(s.contains("open \"$APPDIR/$APPNAME.app\""));
+        // 失败兜底：保留旧包并重启旧版本
+        assert!(s.contains("保留旧版本并重启"));
     }
 }

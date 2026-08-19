@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -42,8 +42,10 @@ pub struct AppState {
     pub pet_stop: Arc<AtomicBool>,
     /// 最近一次桌宠状态快照（JSON），供 pet_status 命令即时返回。
     pub pet_snapshot: Arc<Mutex<Option<serde_json::Value>>>,
-    /// 桌宠待查看通知（任务完成 / 被阻塞 / 被中断）；打开主界面后清除。
+    /// 桌宠待查看通知（任务完成 / 被阻塞 / 被中断 / 失败）；打开主界面后清除。
     pub pet_notice: Arc<Mutex<Option<crate::pet::PetNotice>>>,
+    /// 流侧（turn/end error）已通知失败的会话 id：轮询据此不重复发「已完成」。
+    pub pet_failed_sessions: Arc<Mutex<HashSet<String>>>,
     /// 主窗口是否处于聚焦状态：聚焦视为用户正在查看，抑制桌宠"任务完成"通知。
     pub main_open: Arc<AtomicBool>,
 }

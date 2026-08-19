@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { dshOrigin, isWhalitoMessage, postToDsh, toPlain } from "./whalitoBridge";
 import LoadingScreen from "./LoadingScreen.vue";
@@ -1050,6 +1050,12 @@ onMounted(async () => {
         if (r) server.value = r;
       } else if (autoRestartCount.value >= MAX_AUTO_RESTART) {
         error.value = `服务器连续 ${MAX_AUTO_RESTART} 次启动失败，已停止自动重试。请查看日志或重新安装 Harness。`;
+        // 桌宠同步提醒（即使主窗口在托盘/后台，桌宠气泡也可见）。
+        void emit("pet-alert", {
+          kind: "system",
+          key: "server-restart-failed",
+          text: `服务器连续 ${MAX_AUTO_RESTART} 次启动失败，已停止自动重试。点击打开面板查看日志。`,
+        });
       }
     }),
   );

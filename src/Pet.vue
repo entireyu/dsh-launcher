@@ -39,13 +39,13 @@ interface PetState {
 
 /** 桌宠待查看通知：设置后持续展示，直到用户打开主界面才清除。 */
 interface PetNotice {
-  kind: "completed" | "blocked" | "interrupted";
+  kind: "completed" | "blocked" | "interrupted" | "failed";
   title: string | null;
   goal: string | null;
 }
 
 interface PetAlert {
-  kind: "approval" | "question";
+  kind: "approval" | "question" | "system";
   key: string;
   rpcId: string;
   sessionId: string;
@@ -53,6 +53,8 @@ interface PetAlert {
   toolName?: string;
   reason?: string;
   questions?: unknown;
+  /** system 类提醒的文案（如服务器连续启动失败）。 */
+  text?: string;
 }
 
 /** 桌宠样式契约（~/.dsh/pet-style.json，可经 DSH 或命令调整）。 */
@@ -103,6 +105,8 @@ const todoInProgress = computed(
 
 const approvals = computed(() => alerts.value.filter((a) => a.kind === "approval"));
 const questions = computed(() => alerts.value.filter((a) => a.kind === "question"));
+/** 系统级提醒（如服务器连续启动失败）：最优先展示，可点 ✕ 关闭。 */
+const systemAlerts = computed(() => alerts.value.filter((a) => a.kind === "system"));
 const firstApproval = computed(() => approvals.value[0] ?? null);
 const alertCount = computed(() => alerts.value.length);
 
@@ -128,17 +132,27 @@ const interruptedNotice = computed(() => {
   return n;
 });
 
+/** 任务失败通知（模型调用重试耗尽等）：即使主窗口聚焦也提醒。 */
+const failedNotice = computed(() => {
+  const n = state.value?.notice;
+  if (!n || n.kind !== "failed") return null;
+  return n;
+});
+
 /** 任务完成/被阻塞通知：仅在空闲时展示（有任务在跑时展示任务进度）。 */
 const completedNotice = computed(() => {
   const n = state.value?.notice;
-  if (!n || n.kind === "interrupted" || !idle.value) return null;
+  if (!n || (n.kind !== "completed" && n.kind !== "blocked") || !idle.value) return null;
   return n;
 });
 
 /** 待查看通知触发注意力动画（与审批/提问同款提醒）。 */
 const attention = computed(
   () =>
-    (alertCount.value > 0 || interruptedNotice.value !== null || completedNotice.value !== null) &&
+    (alertCount.value > 0 ||
+      interruptedNotice.value !== null ||
+      failedNotice.value !== null ||
+      completedNotice.value !== null) &&
     anim.value.attention,
 );
 
@@ -185,7 +199,14 @@ function scheduleIdleBubble(first: boolean) {
 /** 空闲冒泡的生效条件：无审批/提问/待查看通知/连接异常，且服务器正常无任务。 */
 const showIdle = computed(() => {
   if (firstApproval.value || questions.value.length > 0) return false;
-  if (interruptedNotice.value || completedNotice.value || phaseLabel.value) return false;
+  if (
+    interruptedNotice.value ||
+    failedNotice.value ||
+    completedNotice.value ||
+    phaseLabel.value
+  ) {
+    return false;
+  }
   return idle.value;
 });
 
@@ -201,10 +222,13 @@ watch(showIdle, (on) => {
 });
 
 const bubbleTitle = computed(() => {
+  const sys = systemAlerts.value[0];
+  if (sys) return "服务器异常";
   const a = firstApproval.value;
   if (a) return a.toolName ? `需要确认：${a.toolName}` : "需要你确认";
   if (questions.value.length > 0) return "需要你回答";
   if (interruptedNotice.value) return "任务已中断";
+  if (failedNotice.value) return "任务失败";
   if (phaseLabel.value) return phaseLabel.value;
   const done = completedNotice.value;
   if (done) return done.kind === "blocked" ? "任务被阻塞" : "任务已完成 🎉";
@@ -216,10 +240,16 @@ const bubbleTitle = computed(() => {
 });
 
 const bubbleSub = computed(() => {
+  const sys = systemAlerts.value[0];
+  if (sys) return sys.text ?? "点击打开面板查看";
   const a = firstApproval.value;
   if (a) return a.reason ?? "点击打开应用确认";
   if (questions.value.length > 0) return "点击打开应用回答";
   if (interruptedNotice.value) return "服务器已断开，点击打开面板查看";
+  if (failedNotice.value) {
+    const what = failedNotice.value.goal ?? failedNotice.value.title;
+    return what ? `失败：${what}` : "点击打开面板查看";
+  }
   if (phaseLabel.value) return null;
   const done = completedNotice.value;
   if (done) {
@@ -485,6 +515,12 @@ window.addEventListener("unhandledrejection", (e) => {
         <button class="allow" @click="respond(firstApproval, 'allowed-once')">允许</button>
         <button class="reject" @click="respond(firstApproval, 'rejected')">拒绝</button>
       </div>
+      <button
+        v-if="systemAlerts.length > 0"
+        class="bubble-close"
+        @click.stop="clearAlert(systemAlerts[0].key)"
+        title="关闭提醒"
+      >✕</button>
     </div>
 
     <!-- 鲸仔本体（按住拖拽 / 轻点打开主界面） -->
@@ -615,6 +651,26 @@ window.addEventListener("unhandledrejection", (e) => {
   background: transparent;
   border-color: #f87171;
   color: #f87171;
+}
+
+/* 系统提醒（如服务器连续启动失败）的关闭按钮：气泡右上角 */
+.bubble-close {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  border: none;
+  background: transparent;
+  color: #9aa3b2;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.bubble-close:hover {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.15);
 }
 
 .whale {

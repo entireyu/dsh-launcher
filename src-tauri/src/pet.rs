@@ -83,12 +83,12 @@ impl PetState {
     }
 }
 
-/// 桌宠待查看通知：任务完成 / 被阻塞 / 被中断。
+/// 桌宠待查看通知：任务完成 / 被阻塞 / 被中断 / 失败。
 /// 设置后持续展示，直到用户打开主界面（show_main → clear_notice）才清除。
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PetNotice {
-    /// completed / blocked / interrupted。
+    /// completed / blocked / interrupted / failed。
     pub kind: String,
     /// 关联会话的标题（projections.title），可能为空。
     pub title: Option<String>,
@@ -349,8 +349,75 @@ fn handle_stream_frame(app: &AppHandle, text: &str) {
                 let _ = app.emit("pet-alert-clear", &key);
             }
         }
+        // 会话事件透传（mux 流 `session/event`）：turn/end 携带本轮结束原因。
+        // 模型调用失败（重试耗尽等 reason=error）→ 立即发「任务失败」通知，
+        // 并记录失败会话，轮询检测完成时不再误报「已完成」。
+        "session/event" => {
+            let session_id = payload
+                .get("sessionId")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let event = payload.get("event");
+            if event
+                .and_then(|e| e.get("type"))
+                .and_then(|t| t.as_str())
+                == Some("turn/end")
+            {
+                let reason = event
+                    .and_then(|e| e.get("data"))
+                    .and_then(|d| d.get("reason"))
+                    .and_then(|r| r.get("kind"))
+                    .and_then(|k| k.as_str());
+                match reason {
+                    Some("error") => {
+                        app.state::<AppState>()
+                            .pet_failed_sessions
+                            .lock()
+                            .unwrap()
+                            .insert(session_id.clone());
+                        let (title, goal) = session_title_goal(app, &session_id);
+                        let notice = PetNotice {
+                            kind: "failed".to_string(),
+                            title,
+                            goal,
+                        };
+                        pet_log("pet notice: failed (turn/end error)");
+                        set_notice(app, notice);
+                    }
+                    Some("completed") | Some("blocked") => {
+                        // 正常结束：清除该会话的失败标记（若有），完成通知交给轮询。
+                        app.state::<AppState>()
+                            .pet_failed_sessions
+                            .lock()
+                            .unwrap()
+                            .remove(&session_id);
+                    }
+                    _ => {}
+                }
+            }
+        }
         _ => {}
     }
+}
+
+/// 从最近一次桌宠快照里取会话的标题与目标（失败通知的上下文文案）。
+fn session_title_goal(app: &AppHandle, session_id: &str) -> (Option<String>, Option<String>) {
+    let snapshot = app.state::<AppState>().pet_snapshot.lock().unwrap().clone();
+    let Some(snap) = snapshot else {
+        return (None, None);
+    };
+    let Some(sessions) = snap.get("sessions").and_then(|s| s.as_array()) else {
+        return (None, None);
+    };
+    for s in sessions {
+        if s.get("sessionId").and_then(|x| x.as_str()) == Some(session_id) {
+            let title = s.get("title").and_then(|t| t.as_str()).map(String::from);
+            let goal = s.get("goal").and_then(goal_objective);
+            return (title, goal);
+        }
+    }
+    (None, None)
 }
 
 /// 一条 WebSocket 下行流（mux 或 host）。断线后指数退避重连。
@@ -460,14 +527,29 @@ fn orchestrator(app: AppHandle) {
                             })
                             .collect();
                         if let Some(notice) = detect_completion(&prev_running, &current_running) {
-                            // 主窗口聚焦时用户正看着 DSH，「任务完成」通知冗余 → 抑制；
-                            // 被阻塞 / 被中断仍需提醒（可能不在场或需要处理）。
-                            let main_open = app.state::<AppState>().main_open.load(Ordering::SeqCst);
-                            if notice.kind == "completed" && main_open {
-                                pet_log("pet notice suppressed: main window focused");
+                            // 流侧已通过 turn/end error 通知「任务失败」的会话，
+                            // 轮询不再重复发「已完成」（避免失败被报成完成）。
+                            let st = app.state::<AppState>();
+                            let mut failed = st.pet_failed_sessions.lock().unwrap();
+                            let had_failed = prev_running.keys().any(|k| failed.contains(k));
+                            if had_failed {
+                                for k in prev_running.keys() {
+                                    failed.remove(k);
+                                }
+                                pet_log("pet notice suppressed: failed sent via turn/end");
                             } else {
-                                pet_log(&format!("pet notice: {}", notice.kind));
-                                set_notice(&app, notice);
+                                // 主窗口聚焦时用户正看着 DSH，「任务完成」通知冗余 → 抑制；
+                                // 被阻塞 / 被中断仍需提醒（可能不在场或需要处理）。
+                                let main_open = app
+                                    .state::<AppState>()
+                                    .main_open
+                                    .load(Ordering::SeqCst);
+                                if notice.kind == "completed" && main_open {
+                                    pet_log("pet notice suppressed: main window focused");
+                                } else {
+                                    pet_log(&format!("pet notice: {}", notice.kind));
+                                    set_notice(&app, notice);
+                                }
                             }
                         }
                         prev_running = current_running;
@@ -499,6 +581,8 @@ fn orchestrator(app: AppHandle) {
                     pet_log(&format!("pet notice: {}", notice.kind));
                     set_notice(&app, notice);
                     prev_running.clear();
+                    // 服务器断开：失败会话标记一并失效。
+                    app.state::<AppState>().pet_failed_sessions.lock().unwrap().clear();
                 }
                 if last_phase.as_deref() != Some("stopped") {
                     pet_log("no reachable server (recorded url and configured port both unhealthy)");

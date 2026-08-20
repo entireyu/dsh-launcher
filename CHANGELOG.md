@@ -4,6 +4,14 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+- DSH 更新/安装的全屏 loading 增加「已用时」计时器：`installingDsh` 期间每秒刷新「已用时 mm:ss」，长时间更新也有明确时间反馈（弹窗 / 设置页 / 引导流程三个入口共用，覆盖「停止服务器 → 更新 → 启动」全程；引导流程「安装 DeepSeek Harness 中」同样显示）
+
+### 变更
+- 启动服务器不再自动打开系统浏览器：DSH rc8+ 默认在 Web 就绪后拉起默认浏览器，与鲸仔内嵌页面重复——现向 `dsh web` 追加 `--no-open` 抑制（rc8 源码确认 `--no-open` 为唯一权威开关，配置文件无法覆盖）。老版本 dsh 不认识该参数（commander 遇未知选项会报错退出），故首次启动用 `dsh web --help` 探测一次并缓存支持情况，不支持的版本自动不加参数；`install_dsh` / `update_dsh` 成功后失效缓存重新探测（覆盖会话内 DSH 升级）。`--no-open` 不影响 `printUrl`，日志仍打印 `dsh web: http://…` 供地址抽取；需要外部浏览器时可用管理后台「在浏览器打开」按钮
+
 ## [0.4.5] - 2026-08-19
 
 ### 新增

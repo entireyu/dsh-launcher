@@ -48,6 +48,9 @@ pub struct AppState {
     pub pet_failed_sessions: Arc<Mutex<HashSet<String>>>,
     /// 主窗口是否处于聚焦状态：聚焦视为用户正在查看，抑制桌宠"任务完成"通知。
     pub main_open: Arc<AtomicBool>,
+    /// 已装 DSH 的 `web` 命令是否支持 `--no-open`（启动服务器时抑制自动开浏览器）。
+    /// `None` = 尚未探测；进程级缓存，`install_dsh`/`update_dsh` 成功后置回 None 重探。
+    pub no_open_supported: Arc<Mutex<Option<bool>>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

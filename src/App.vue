@@ -94,6 +94,10 @@ const installingDsh = ref(false);
 const latestVersion = ref<string | null>(null);
 // DSH 更新进度文案（面板进度条 / 内嵌页更新 loading 共用）。
 const dshUpdateMessage = ref("");
+// DSH 更新/安装 loading 的已用时计时器（全屏 loading 显示「已用时 mm:ss」）。
+const dshUpdateElapsed = ref("");
+let dshUpdateStartedAt = 0;
+let dshUpdateTimer: number | undefined;
 // 鲸仔自更新状态：全屏遮罩显示下载 / 安装进度，直到应用退出重启。
 const whalitoUpdating = ref(false);
 const whalitoUpdateMessage = ref("");
@@ -457,6 +461,36 @@ async function finishDshUpdate() {
   await refreshStatus();
   pushSnapshot();
 }
+
+// ============ DSH 更新/安装 loading 计时器 ============
+// installingDsh 期间每秒刷新「已用时 mm:ss」，长时间更新也有明确反馈。
+function tickDshUpdateTimer() {
+  const total = Math.max(0, Math.floor((Date.now() - dshUpdateStartedAt) / 1000));
+  const mm = String(Math.floor(total / 60)).padStart(2, "0");
+  const ss = String(total % 60).padStart(2, "0");
+  dshUpdateElapsed.value = `已用时 ${mm}:${ss}`;
+}
+
+function startDshUpdateTimer() {
+  dshUpdateStartedAt = Date.now();
+  tickDshUpdateTimer();
+  if (dshUpdateTimer !== undefined) window.clearInterval(dshUpdateTimer);
+  dshUpdateTimer = window.setInterval(tickDshUpdateTimer, 1000);
+}
+
+function stopDshUpdateTimer() {
+  if (dshUpdateTimer !== undefined) {
+    window.clearInterval(dshUpdateTimer);
+    dshUpdateTimer = undefined;
+  }
+  dshUpdateElapsed.value = "";
+}
+
+// installingDsh 置位即开始计时（覆盖弹窗 / 设置页 / 引导流程三个入口），复位即停止。
+watch(installingDsh, (v) => {
+  if (v) startDshUpdateTimer();
+  else stopDshUpdateTimer();
+});
 
 async function startServer() {
   autoRestartCount.value = 0;
@@ -1136,6 +1170,7 @@ onUnmounted(() => {
   unlisteners.forEach((u) => u());
   if (pollTimer) window.clearInterval(pollTimer);
   if (versionTimer) window.clearInterval(versionTimer);
+  if (dshUpdateTimer !== undefined) window.clearInterval(dshUpdateTimer);
 });
 
 // 离开内嵌页视图时收起右键菜单。
@@ -1162,6 +1197,7 @@ function autoScroll() {
       v-if="installingDsh"
       status="更新 DeepSeek Harness 中"
       :detail="dshUpdateMessage"
+      :timer="dshUpdateElapsed"
     />
     <LoadingScreen
       v-else-if="serverBusy"
@@ -1194,7 +1230,11 @@ function autoScroll() {
     <div v-if="view === 'flow'" class="flow">
       <!-- 全屏统一 loading：检测环境 / 安装 DSH / 启动服务器（出错时自动切回卡片） -->
       <template v-if="flowLoading && !flowError">
-        <LoadingScreen :status="flowLoadingStatus" :detail="flowLoadingDetail" />
+        <LoadingScreen
+          :status="flowLoadingStatus"
+          :detail="flowLoadingDetail"
+          :timer="dshUpdateElapsed"
+        />
         <button class="ghost link flow-exit" @click="goPanel">进入鲸仔管理后台</button>
       </template>
       <template v-else>

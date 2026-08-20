@@ -16,6 +16,8 @@ pub struct Shared {
     pub url: Arc<Mutex<Option<String>>>,
     pub logs: Arc<Mutex<VecDeque<String>>>,
     pub settings: Arc<Mutex<Settings>>,
+    /// 已装 DSH 是否支持 `--no-open`（None = 未探测，进程级缓存）。
+    pub no_open_supported: Arc<Mutex<Option<bool>>>,
 }
 
 impl Shared {
@@ -26,6 +28,7 @@ impl Shared {
             url: Arc::clone(&st.server_url),
             logs: Arc::clone(&st.logs),
             settings: Arc::clone(&st.settings),
+            no_open_supported: Arc::clone(&st.no_open_supported),
         }
     }
 
@@ -570,6 +573,7 @@ fn install_dsh_inner(app: &AppHandle, shared: &Shared, spec: &str) -> Result<Env
 pub async fn install_dsh(app: AppHandle, st: State<'_, AppState>) -> Result<EnvInfo, String> {
     let shared = Shared::from_state(&st);
     let app_for_sync = app.clone();
+    let no_open_supported = Arc::clone(&shared.no_open_supported);
     // 首次安装固定 latest（稳定版）：版本偏好只影响检查与更新，
     // 避免预发布版直接用于全新环境；装好后可切偏好再更新。
     let env = tauri::async_runtime::spawn_blocking(move || install_dsh_inner(&app, &shared, "@deepseek-ai/dsh"))
@@ -577,6 +581,8 @@ pub async fn install_dsh(app: AppHandle, st: State<'_, AppState>) -> Result<EnvI
         .map_err(|e| e.to_string())??;
     // 安装/更新会清空应用目录，重同步鲸仔设置分区插件。
     let _ = crate::settings_plugin::ensure_settings_plugin(&app_for_sync);
+    // 已装 DSH 变了（可能支持/不再支持 --no-open），失效缓存让下次启动重探。
+    *no_open_supported.lock().unwrap() = None;
     Ok(env)
 }
 
@@ -584,6 +590,7 @@ pub async fn install_dsh(app: AppHandle, st: State<'_, AppState>) -> Result<EnvI
 pub async fn update_dsh(app: AppHandle, st: State<'_, AppState>) -> Result<EnvInfo, String> {
     let shared = Shared::from_state(&st);
     let app_for_sync = app.clone();
+    let no_open_supported = Arc::clone(&shared.no_open_supported);
     let spec = dsh_update_spec(shared.dsh_channel());
     let env = tauri::async_runtime::spawn_blocking(move || {
         install_dsh_inner(&app, &shared, &spec)
@@ -591,6 +598,8 @@ pub async fn update_dsh(app: AppHandle, st: State<'_, AppState>) -> Result<EnvIn
     .await
     .map_err(|e| e.to_string())??;
     let _ = crate::settings_plugin::ensure_settings_plugin(&app_for_sync);
+    // 已装 DSH 变了（可能支持/不再支持 --no-open），失效缓存让下次启动重探。
+    *no_open_supported.lock().unwrap() = None;
     Ok(env)
 }
 
@@ -680,6 +689,26 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
         .clone()
         .ok_or("未检测到 Node.js，请先安装。".to_string())?;
     let bin = state::resolve_dsh_bin(&env).ok_or("找不到 dsh 入口文件，请重新安装 Harness。".to_string())?;
+    let bin_s = bin.to_string_lossy().to_string();
+
+    // DSH rc8+ 默认在 Web 就绪后自动打开系统浏览器；鲸仔以内嵌页面为主，
+    // 追加 `--no-open` 抑制。老版本 dsh 不认识该参数（commander 遇到未知选项
+    // 会报错退出导致启动失败），故首次启动用 `dsh web --help` 探测一次并缓存；
+    // 探测失败（如老版本没有 web 子命令）按不支持处理，不影响启动。
+    let no_open = {
+        let cache = shared.no_open_supported.lock().unwrap();
+        match *cache {
+            Some(v) => v,
+            None => {
+                drop(cache);
+                let probe =
+                    state::run_output(&node, &[bin_s.as_str(), "web", "--help"]).unwrap_or_default();
+                let v = probe.contains("--no-open");
+                *shared.no_open_supported.lock().unwrap() = Some(v);
+                v
+            }
+        }
+    };
 
     // 启动前强制同步鲸仔设置分区插件（幂等），保证 Loader 能解析插件条目。
     crate::settings_plugin::ensure_settings_plugin(app)?;
@@ -704,10 +733,13 @@ pub fn start_server_impl(app: &AppHandle, shared: &Shared) -> Result<ServerStatu
             cmd.env("DSH_DIALOG_OWNER_HWND", (hwnd.0 as usize).to_string());
         }
     }
-    cmd.arg(bin.to_string_lossy().to_string())
+    cmd.arg(&bin_s)
         .arg("web")
         .arg("--port")
         .arg(port.to_string());
+    if no_open {
+        cmd.arg("--no-open");
+    }
     if let Some(ws) = workspace.filter(|w| !w.trim().is_empty()) {
         cmd.current_dir(&ws);
     }

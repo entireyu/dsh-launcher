@@ -637,6 +637,15 @@ button.link {
   font-size: 12px;
 }
 
+/* 更新/安装 DSH 的已用时计时器（如「已用时 01:23」） */
+.loading-timer {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
 /* 全屏 loading 期间右下角「进入鲸仔管理后台」入口 */
 .flow-exit {
   position: fixed;

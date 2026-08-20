@@ -4,7 +4,7 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.4.6] - 2026-08-20
 
 ### 新增
 - DSH 更新/安装的全屏 loading 增加「已用时」计时器：`installingDsh` 期间每秒刷新「已用时 mm:ss」，长时间更新也有明确时间反馈（弹窗 / 设置页 / 引导流程三个入口共用，覆盖「停止服务器 → 更新 → 启动」全程；引导流程「安装 DeepSeek Harness 中」同样显示）
